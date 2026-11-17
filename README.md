@@ -12,7 +12,7 @@
 </div>
 
 ```text
-帮我装这个工作台：https://github.com/wujing855/academic-workbench
+帮我装这个工作台：https://github.com/yaokelan33-hash/academic-workbench
 
 请照着仓库里 SKILL/SKILL.md 的部署向导做：先问我该问的问题，剩下的安装和配置你来做，
 装完逐项验证一遍再交给我。请用 main 分支的最新代码，不要下载 Releases 里的历史版本。
