@@ -5,8 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>学术工作台</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='14' fill='%230F766E' stroke='%230F766E' stroke-width='2'/><circle cx='16' cy='16' r='5' fill='%230F766E'/></svg>">
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/style.css?v=20261108zr">
   <link rel="stylesheet" href="https://miaoda.feishu.cn/fonts/css2?family=Noto+Serif+SC:wght@400;600;700&family=Noto+Sans+SC:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500&display=swap">
+  <!-- 公式渲染：精读/译文里的 LaTeX（$…$、$$…$$、\(…\)、\[…\]）用 KaTeX 排成正常数学格式 -->
+  <link rel="stylesheet" href="/static/vendor/katex/katex.min.css">
+  <script defer src="/static/vendor/katex/katex.min.js"></script>
+  <script defer src="/static/vendor/katex/auto-render.min.js"></script>
 </head>
 <body>
 
@@ -84,16 +88,14 @@
       </div>
       <div class="nav-group">
         <div class="nav-group-label">情报 · 日报</div>
-        <button class="nav-item" data-panel="frontier">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4.5" opacity="0.55"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/><circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"/></svg>
-          <span>前沿瞭望</span>
-          <span class="nav-badge" id="navFrontierBadge" style="display:none;">0</span>
-        </button>
         <button class="nav-item" data-panel="hotspots">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v3H4z"/><path d="M4 9h10v11H4z"/><path d="M16 9h4v11h-4z"/><line x1="7" y1="12.5" x2="11" y2="12.5"/><line x1="7" y1="16" x2="11" y2="16"/></svg>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4.5" opacity="0.55"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/><circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"/></svg>
           <span>热点日报</span>
           <span class="nav-badge" id="navHotspotBadge" style="display:none;">0</span>
         </button>
+        <div hidden>
+          <span id="navFrontierBadge" style="display:none;">0</span>
+        </div>
         <button class="nav-item" data-panel="weekly">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M22 7l-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>
           <span>科技周报</span>
@@ -187,7 +189,7 @@
             <div class="card-label">毕业条件</div>
             <div class="grad-compact-top">
               <div class="grad-compact-info">
-                <span class="grad-compact-name">C 刊论文</span>
+                <span class="grad-compact-name" id="gradCJrnlName">C 刊论文</span>
                 <span class="grad-compact-count">
                   <span class="grad-compact-num" id="gradCJrnlAchieved">0</span>
                   <span class="grad-compact-sep">/</span>
@@ -195,8 +197,9 @@
                 </span>
               </div>
               <div class="graduation-bar"><div class="graduation-bar-fill" id="gradCJrnlBar"></div></div>
-              <div class="grad-compact-hint">需发表 2 篇 C 刊</div>
+              <div class="grad-compact-hint" id="gradCompactHint">需发表 2 篇 C 刊</div>
             </div>
+            <div class="grad-track" id="gradTrack"></div>
             <div class="grad-compact-bottom">
               <button class="graduation-add-btn" id="pubAddBtn">+ 登记论文</button>
               <div class="pub-list" id="pubList"></div>
@@ -210,21 +213,6 @@
           <div class="card-label">今日待办</div>
           <div class="todo-mini todo-mini-wide" id="dashboardTodos"></div>
           <button class="btn-goto" data-goto="todos">查看全部待办</button>
-        </div>
-
-        <div class="grid-3">
-          <div class="card stat-card">
-            <div class="stat-num" id="statFiles">0</div>
-            <div class="stat-label">文件总数</div>
-          </div>
-          <div class="card stat-card">
-            <div class="stat-num" id="statDirs">0</div>
-            <div class="stat-label">目录数</div>
-          </div>
-          <div class="card stat-card">
-            <div class="stat-num" id="statNews">0</div>
-            <div class="stat-label">资讯条目</div>
-          </div>
         </div>
 
         <div class="card">
@@ -241,7 +229,7 @@
           <div class="card-label">新建待办</div>
           <div class="todo-input-row">
             <input type="text" id="todoInput" class="todo-input" placeholder="输入新待办，回车添加…">
-            <select id="todoPriority" class="todo-input" style="flex:0 0 100px;cursor:pointer;">
+            <select id="todoPriority" class="todo-input todo-select" style="flex:0 1 100px;cursor:pointer;">
               <option value="普通">普通</option>
               <option value="高">高优先级</option>
               <option value="低">低优先级</option>
@@ -319,13 +307,30 @@
 
       <!-- ===== 面板：资讯 ===== -->
       <section class="panel" id="panel-news">
+        <div class="news-search-row">
+          <div class="news-search-wrap">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            <input type="text" id="newsScholarQuery" class="news-search" placeholder="粘贴论文题目，去 Google Scholar 找这篇文献…">
+          </div>
+          <button class="news-search-btn" id="newsScholarBtn" title="用题目在 Google Scholar 检索文献">搜文献</button>
+          <span class="ablesci-points" id="ablesciPoints" hidden></span>
+        </div>
         <div class="news-filter-row">
           <div class="news-tabs" id="newsTabs"></div>
           <button class="news-rel-toggle" id="newsRelToggle" title="只显示与你的研究领域相关的条目">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
             <span>只看相关</span>
           </button>
+          <button class="news-rel-toggle" id="newsInboxToggle" title="开启后，下载的 PDF 会按论文标题重命名并归档到文献库目录">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            <span>下载入文献库</span>
+          </button>
+          <button class="news-rel-toggle" id="newsTranscribeToggle" title="开启后，归档进文献库的 PDF 会自动送「PDF 转写」（本地解析）">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 7 4 4 20 4 20 7"/><line x1="9" y1="20" x2="15" y2="20"/><line x1="12" y1="4" x2="12" y2="20"/></svg>
+            <span>自动转写</span>
+          </button>
         </div>
+        <div class="ablesci-status" id="ablesciStatus" hidden></div>
         <div class="news-list" id="newsList"></div>
       </section>
 
@@ -348,7 +353,12 @@
         <div class="lit-subpanel" id="lit-glossary">
           <div class="lit-search-wrap">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-            <input type="text" id="glossarySearch" class="lit-search" placeholder="搜索术语、全称、中文译名…">
+            <input type="text" id="glossarySearch" class="lit-search" placeholder="查术语：边输边筛本地词条；回车或点「外部搜索」去 Google Scholar 搜全网…">
+          </div>
+          <div class="glossary-actions">
+            <button class="glossary-ext-btn" id="glossaryScholarBtn" title="用当前词条去 Google Scholar 搜索（搜到的是全网的文献，不只本地词条）">外部搜索 Scholar</button>
+            <button class="glossary-ext-btn" id="glossarySemanticBtn" title="用当前词条去 Semantic Scholar 搜索语义相近的论文">Semantic Scholar</button>
+            <span class="glossary-hint">本地词条只覆盖常用术语；搜不到的就去外部搜索</span>
           </div>
           <div class="glossary-list" id="glossaryList"></div>
         </div>
@@ -435,6 +445,16 @@
           </div>
         </div>
 
+        <!-- 文献库 PDF：下载归档进来的原文，点一下就能直接送转写 -->
+        <div class="card pdf-inbox-card">
+          <div class="card-dot"></div>
+          <div class="card-label">文献库 PDF
+            <button class="pdf-inbox-refresh" id="pdfInboxRefresh" title="重新扫描文献库目录">刷新</button>
+          </div>
+          <div class="pdf-inbox-hint" id="pdfInboxHint">从资讯「求助全文」下载并归档的 PDF 会出现在这里</div>
+          <ul class="pdf-inbox-list" id="pdfInboxList"></ul>
+        </div>
+
         <!-- 进度 -->
         <div class="card pdf-progress-card" id="pdfProgressCard" hidden>
           <!-- 原来这里有个 .card-dot：其他卡片都是「点 + 标题」成对（上传 PDF / 转写结果），
@@ -476,7 +496,6 @@
               <div class="pdf-result-meta" id="pdfResultMeta"></div>
             </div>
             <div class="pdf-result-actions">
-              <button class="pdf-mini-btn pdf-mini-btn-primary" id="pdfIngestBtn">存入文献库</button>
               <button class="pdf-mini-btn" id="pdfCopyBtn">复制 Markdown</button>
               <button class="pdf-mini-btn" id="pdfDownloadBtn">下载 .md</button>
               <button class="pdf-mini-btn pdf-open-folder-btn" id="pdfOpenFolderBtn" title="在 Finder 中打开转写结果所在文件夹"><svg class="ico-inline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg> 打开文件夹</button>
@@ -590,61 +609,29 @@
         </div><!-- /pdf-workspace -->
       </section>
 
-      <!-- ===== 面板：前沿瞭望（双通道学术雷达，报纸风归档） ===== -->
-      <section class="panel" id="panel-frontier">
-        <div id="frontierListView">
-          <div class="hs-masthead">
-            <div class="hs-masthead-left">
-              <div class="hs-masthead-title">前沿瞭望 · 双通道学术雷达</div>
-              <div class="hs-masthead-sub">壹 应用前沿 ｜ 贰 深度评述 · 每天出一期，每条都带原文链接</div>
-            </div>
-            <div class="hs-masthead-actions">
-              <button class="hs-btn" id="frontierFolderBtn" title="在 Finder 中打开归档目录">归档目录</button>
-              <button class="hs-btn hs-btn-primary" id="frontierRefreshBtn">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
-                <span>刷新列表</span>
-              </button>
-            </div>
-          </div>
-          <div class="hs-hint">
-            <strong>双通道与可信度标注：</strong>通道壹追踪本领域的应用突破（新方法 · 新工具 · 关键论文），通道贰追踪方法论与概念层面的反思与争论。凡文献类条目一律附原文链接，并标注三类可信度：<code>同行评议</code>／<code>预印本</code>／<code>新闻解读</code>。每期以 <code>YYYY-MM-DD.html</code> 永久保存在 <code>data/frontier/</code>，点击任一期即在下方原版式展开。
-          </div>
-          <div class="hs-list" id="frontierList"></div>
-        </div>
-        <div id="frontierDetailView" style="display:none;">
-          <div class="hs-detail-head">
-            <button class="hs-btn" id="frontierBackBtn">← 返回归档列表</button>
-            <div class="hs-detail-title" id="frontierDetailTitle"></div>
-            <a class="hs-btn" id="frontierOpenTab" target="_blank" rel="noopener">新标签页打开</a>
-          </div>
-          <div class="paper-wrap" id="frontierFrame"></div>
-        </div>
-      </section>
-
-      <!-- ===== 面板：热点日报（报纸风归档） ===== -->
+      <!-- ===== 面板：热点日报（六类资讯合并成一条流，每条直达原文） ===== -->
       <section class="panel" id="panel-hotspots">
         <div id="hotspotsListView">
           <div class="hs-masthead">
             <div class="hs-masthead-left">
-              <div class="hs-masthead-title">热点日报 · 全网热点检测</div>
-              <div class="hs-masthead-sub">每天 10:00 / 16:00 自动生成 · 每期归档保留 · 报纸版面版</div>
+              <div class="hs-masthead-title">热点日报</div>
+              <div class="hs-masthead-sub">每天 9 点为界，取此前 24 小时最值得看的 10 件事（专业 / 科技 / 行业 / 金融 / 国际都算）· 每篇后面 👍 多推、👎 少推</div>
             </div>
             <div class="hs-masthead-actions">
-              <button class="hs-btn" id="hotspotFolderBtn" title="在 Finder 中打开归档目录">归档目录</button>
+              <button class="hs-btn" id="hotspotFolderBtn" title="打开日报与前沿归档目录">归档目录</button>
               <button class="hs-btn hs-btn-primary" id="hotspotRefreshBtn">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
-                <span>刷新列表</span>
+                <span>刷新</span>
               </button>
             </div>
           </div>
-          <div class="hs-hint">
-            <strong>生成与归档：</strong>每天 10:00（上午版）和 16:00（下午版）各出一期。流程是先读 Skill 文档，再去全网采热点，筛完分类挑 TOP3 深挖，最后排成报纸版式。文件按 <code>YYYY-MM-DD_上午版.html / YYYY-MM-DD_下午版.html</code> 存在 <code>09_工作台程序/data/hotspots/</code>，下午版会和上午版对照去重。点任一期，就在下面按原版式展开。
-          </div>
-          <div class="hs-list" id="hotspotList"></div>
+          <div class="hs-filters" id="hotFeedFilters"></div>
+          <div class="hs-digest" id="hotDigest"></div>
+          <div class="hs-list news-list" id="hotFeedList"></div>
         </div>
         <div id="hotspotsDetailView" style="display:none;">
           <div class="hs-detail-head">
-            <button class="hs-btn" id="hotspotBackBtn">← 返回归档列表</button>
+            <button class="hs-btn" id="hotspotBackBtn">← 返回热点日报</button>
             <div class="hs-detail-title" id="hotspotDetailTitle"></div>
             <a class="hs-btn" id="hotspotOpenTab" target="_blank" rel="noopener">新标签页打开 ↗</a>
           </div>
@@ -652,25 +639,21 @@
         </div>
       </section>
 
-      <!-- ===== 面板：科技爱好者周刊 ===== -->
+      <!-- ===== 面板：科技周报（全球科技博主近 7 天热帖） ===== -->
       <section class="panel" id="panel-weekly">
         <div class="hs-masthead">
           <div class="hs-masthead-left">
-            <div class="hs-masthead-title">科技爱好者周刊</div>
-            <div class="hs-masthead-sub">阮一峰 · 每周五更新 · 每期标着发布日期 · 缓存 6 小时</div>
+            <div class="hs-masthead-title">科技周报</div>
+            <div class="hs-masthead-sub">全球 17 个科技博主 / 官方研究博客 · 近 7 天热帖，按话题热度排序</div>
           </div>
           <div class="hs-masthead-actions">
-            <button class="hs-btn" id="weeklyArchiveBtn" title="在 GitHub 打开完整归档">完整归档 ↗</button>
             <button class="hs-btn hs-btn-primary" id="weeklyRefreshBtn">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
               <span>刷新</span>
             </button>
           </div>
         </div>
-        <div class="hs-hint">
-          数据来自阮一峰的 <code>ruanyf/weekly</code> 开源仓库，一次抓最近几期，缓存 6 小时。想提前看新刊，点上面「刷新」。
-        </div>
-        <div class="hs-list" id="weeklyList"></div>
+        <div class="hs-list news-list" id="bloggerList"></div>
       </section>
 
       <!-- ===== 面板：摘要卡片 ===== -->
@@ -683,7 +666,17 @@
             </div>
             <div class="hs-masthead-actions">
               <button class="hs-btn" id="summarySelectToggle" title="开启后点卡片即可勾选，用于批量生成综述或导出">勾选模式</button>
-              <button class="hs-btn" id="summaryBibBtn" title="导出全部（或勾选）卡片为 BibTeX 文献格式">导出 BibTeX</button>
+              <select class="hs-btn hs-select" id="exportFmtTop" title="选择文献导出格式">
+                <option value="gb7714">GB/T 7714（国标）</option>
+                <option value="apa">APA</option>
+                <option value="mla">MLA</option>
+                <option value="chicago">Chicago</option>
+                <option value="ris">RIS</option>
+                <option value="endnote">EndNote</option>
+                <option value="csljson">CSL-JSON</option>
+                <option value="bibtex">BibTeX</option>
+              </select>
+              <button class="hs-btn" id="summaryBibBtn" title="按左边选中的格式复制全部（或勾选）文献到剪贴板">复制文献</button>
               <button class="hs-btn" id="summaryFolderBtn" title="在 Finder 中打开保存目录">保存目录</button>
               <button class="hs-btn hs-btn-primary" id="summaryRefreshBtn">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
@@ -704,6 +697,7 @@
             </label>
           </div>
           <div class="sum-tag-filter" id="summaryTagFilter"></div>
+          <div class="grp-bar" id="summaryGroupFilter"></div>
           <div class="sum-card-list" id="summaryCardList"></div>
           <div class="sum-empty" id="summaryEmpty" hidden>
             <div class="sum-empty-icon"><svg class="ico-inline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg></div>
@@ -714,7 +708,7 @@
           <div class="sum-action-bar" id="sumActionBar" hidden>
             <span class="sum-action-count" id="sumActionCount">已选 0 篇</span>
             <button class="hs-btn hs-btn-primary" id="sumActionReview">生成综述草稿</button>
-            <button class="hs-btn" id="sumActionBib">导出 BibTeX</button>
+            <button class="hs-btn" id="sumActionBib">复制文献</button>
             <button class="hs-btn" id="sumActionClear">取消选择</button>
           </div>
         </div>
@@ -757,6 +751,7 @@
               <input type="search" id="transSearch" placeholder="搜索标题 / 来源 / 正文片段…" autocomplete="off" />
             </label>
           </div>
+          <div class="grp-bar" id="transGroupFilter"></div>
           <div class="trans-list" id="transList"></div>
           <div class="sum-empty" id="transEmpty" hidden>
             <div class="sum-empty-icon"><svg class="ico-inline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></div>
@@ -768,7 +763,7 @@
           <div class="hs-detail-head">
             <button class="hs-btn" id="transBackBtn">← 返回译文列表</button>
             <div class="hs-detail-title" id="transDetailTitle"></div>
-            <button class="hs-btn" id="transDeleteBtn" title="从译文库移除（不影响转写任务里的原文）">删除</button>
+            <button class="hs-btn entry-del" id="transDeleteBtn" aria-label="从译文库移除" title="从译文库移除（不影响转写任务里的原文）">×</button>
           </div>
           <div class="trans-detail-meta" id="transDetailMeta"></div>
           <div class="xref-bar" id="transXref"></div>
@@ -798,6 +793,7 @@
               <input type="search" id="readSearch" placeholder="搜索标题 / 来源 / 正文片段…" autocomplete="off" />
             </label>
           </div>
+          <div class="grp-bar" id="readGroupFilter"></div>
           <div class="trans-list" id="readList"></div>
           <div class="sum-empty" id="readEmpty" hidden>
             <div class="sum-empty-icon"><svg class="ico-inline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg></div>
@@ -809,7 +805,7 @@
           <div class="hs-detail-head">
             <button class="hs-btn" id="readBackBtn">← 返回精读列表</button>
             <div class="hs-detail-title" id="readDetailTitle"></div>
-            <button class="hs-btn" id="readDeleteBtn" title="从精读库移除（不影响转写任务里的原文件）">删除</button>
+            <button class="hs-btn entry-del" id="readDeleteBtn" aria-label="从精读库移除" title="从精读库移除（不影响转写任务里的原文件）">×</button>
           </div>
           <div class="trans-detail-meta" id="readDetailMeta"></div>
           <div class="xref-bar" id="readXref"></div>
@@ -838,7 +834,7 @@
               </select>
               <span style="font-size:12px;color:var(--text-muted);">选择日志类型</span>
             </div>
-            <textarea id="journalInput" class="journal-input" placeholder="今天的研究进展、想法、卡住的地方…&#10;写 [[card:论文标题]] 能链到摘要卡片，点一下就跳过去" rows="3"></textarea>
+            <textarea id="journalInput" class="journal-input" placeholder="今天的研究进展、想法、卡住的地方，都记在这里&#10;想引用某篇论文：写 [[card:论文标题]]，保存后点标题就能跳到那张摘要卡片" rows="3"></textarea>
             <button class="btn-primary" id="journalAddBtn">记录</button>
           </div>
         </div>
@@ -1113,6 +1109,6 @@
   </div>
 </div>
 
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v=20261108zr"></script>
 </body>
 </html>

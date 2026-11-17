@@ -22,6 +22,10 @@
 
 **不用会写代码 · 不用打开终端 · 不用自己装 Python · 不用改任何文件**
 
+> **本仓库说明**：这是 [wujing855/academic-workbench](https://github.com/wujing855/academic-workbench) 的改进分支（fork），
+> 保留原作者的 MIT 许可与版权声明。相对上游新增的功能见文末「[本分支的改动](#本分支的改动)」。
+> 上游的 Releases、Issue 与 Star 都请记在原仓库。
+
 ![Python](https://img.shields.io/badge/Python-3.8%2B-3776AB?logo=python&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-0F766E)
 ![Dependencies](https://img.shields.io/badge/%E4%BE%9D%E8%B5%96-%E4%BB%85%E6%A0%87%E5%87%86%E5%BA%93-059669)
@@ -298,3 +302,34 @@ MIT License —— 随便用、随便改，保留版权声明即可。
 AI Agent 协作：[WorkBuddy](https://www.workbuddy.cn) · TRAE · 豆包；同样适用于 Claude Code、Codex、Cursor、Cline 等任何能读写文件的 Agent。
 
 如果这套工作台帮你省下了一点时间，欢迎点个 ⭐ —— 也欢迎告诉我你加了什么我没想过的东西。
+
+---
+
+## 本分支的改动
+
+相对上游 `wujing855/academic-workbench`，本 fork 只做了通用性改造，不含任何个人配置、账号或院校信息。
+
+**阅读体验**
+
+- 三个详情页（摘要 / 翻译 / 精读）右侧新增可拖拽的滚动轴：贴屏幕最右侧、可点可拖，滚到底部时左上角浮出「返回」按钮，按钮位置动态避开顶栏与侧边栏。
+- 摘要卡关键词改为浅底描边胶囊、水平居中（原样式是深青字压深青底，几乎看不清）。
+- 待办「新建待办」表单在窄屏自动换行，不再顶出卡片右缘。
+
+**PDF 转写**
+
+- 转写失败不再只显示「没有可用结果」：前端识别 `status=error`，停掉进度动画、显示失败卡片，并把引擎报错的第一行翻成中文提示。
+- `pdf_worker/worker.py` 增加公式与表格的清洗（KaTeX 渲染不支持的命令会被剥离或替换），减少「红字公式 / HTML 表格标签当正文」。
+- 本地引擎加 MinerU 版本探测与提示，版本不符时直接说明原因。
+
+**面板与服务**
+
+- 新增 `--lan` 启动参数：监听 `0.0.0.0` 并在启动横幅打印内网地址，方便同一 Wi-Fi 下用手机或另一台电脑访问（注意：无鉴权，只建议在可信网络里用）。
+- HTTP 服务改为 `ThreadingHTTPServer`，面板并发请求不再互相阻塞。
+- 新增热点日报面板接口 `/api/hotspots`，按文件名倒序列出 `data/hotspots/` 下的单文件日报（上午版 / 下午版分别归档）。
+- 新增「毕业设计」板块（`09_毕业设计`）+ 5 个子目录 + `00_说明.md`，并在文件夹面板配了学位帽图标。
+- 科研通（ablesci.com）积分看板与文献下载队列（可选功能，需自己登录该站；不写入任何凭证）。
+
+**许可**
+
+仍为 MIT。任何二次分发请保留 `LICENSE` 中的原始版权声明。
+

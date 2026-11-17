@@ -66,9 +66,23 @@ CATEGORY_DIRS = {
 PORT = 8766
 HOST = "127.0.0.1"
 
+
+def _images_on_disk(job_dir):
+    """内存里没有任务记录时，按目录里 images/ 的实际文件还原图片清单。"""
+    d = os.path.join(job_dir, "images")
+    out = []
+    if not os.path.isdir(d):
+        return out
+    for root, _dirs, files in os.walk(d):
+        for fn in files:
+            full = os.path.join(root, fn)
+            out.append(os.path.relpath(full, job_dir).replace(os.sep, "/"))
+    out.sort()
+    return out
+
 # worker 用 venv 的 python 启动，mineru CLI 与 python 在同一 bin 目录
 VENV_BIN = os.path.dirname(sys.executable)
-MINERU_CLI = os.path.join(VENV_BIN, "mineru")
+MINERU_CLI = os.path.join(VENV_BIN, "mineru.exe" if os.name == "nt" else "mineru")
 
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")
 
@@ -124,18 +138,26 @@ def local_mineru_major_version():
     （`mineru parse <路径> --output …`，顶层只剩 --version），本项目调用的是
     3.x 那套参数，装 4.x 后转写必定失败，而且安装时毫无提示。
     """
-    venv_lib = os.path.join(os.path.dirname(VENV_BIN), "lib")
-    try:
-        for pylib in sorted(os.listdir(venv_lib)):
-            sp = os.path.join(venv_lib, pylib, "site-packages")
-            if not os.path.isdir(sp):
-                continue
+    venv_root = os.path.dirname(VENV_BIN)
+    if os.name == "nt":
+        candidates = [os.path.join(venv_root, "Lib", "site-packages")]
+    else:
+        lib_dir = os.path.join(venv_root, "lib")
+        try:
+            candidates = [os.path.join(lib_dir, d, "site-packages")
+                          for d in sorted(os.listdir(lib_dir))]
+        except OSError:
+            candidates = []
+    for sp in candidates:
+        if not os.path.isdir(sp):
+            continue
+        try:
             for name in sorted(os.listdir(sp)):
                 m = re.match(r"mineru-(\d+)\.[\d.]+\.dist-info$", name)
                 if m:
                     return int(m.group(1))
-    except OSError:
-        return None
+        except OSError:
+            continue
     return None
 
 
@@ -248,7 +270,11 @@ def _kill_stale_mineru():
     按本项目 venv 内 CLI 的绝对路径匹配，不会误杀其它程序或 worker 自身。
     """
     try:
-        subprocess.run(["pkill", "-f", MINERU_CLI], capture_output=True, timeout=10)
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/F", "/IM", "mineru.exe"],
+                           capture_output=True, timeout=10)
+        else:
+            subprocess.run(["pkill", "-f", MINERU_CLI], capture_output=True, timeout=10)
         time.sleep(1.5)
     except Exception:
         pass
@@ -464,9 +490,24 @@ def _collect_outputs(job, out_dir, mgr, note=""):
 
     result_md = os.path.join(job_dir, "result.md")
     shutil.copy2(src_md, result_md)
+    sanitize_math_md(result_md)
     text = "本地解析完成" + ("（" + note + "）" if note else "")
     mgr.update(jid, status="done", progress=100, progressText=text,
                resultMarkdownPath=result_md, images=images)
+
+
+def sanitize_math_md(path):
+    """新写出的 Markdown 立刻用 KaTeX 当裁判修一遍公式（失败也只警告，不影响主流程）。
+    惠及所有后续任务：新增损坏不再依赖人工事后清理。"""
+    try:
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        script = os.path.join(root, "tools", "repair_math_with_katex.py")
+        if not os.path.isfile(script) or not os.path.isfile(path):
+            return
+        subprocess.run([sys.executable, script, "--file", path, "--apply"],
+                       capture_output=True, timeout=180)
+    except Exception as exc:   # noqa: BLE001
+        print("[math] 公式自检跳过：%s" % exc, flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -630,6 +671,7 @@ def _build_summarize_prompt(depth, text):
             '3. "innovation": 创新点（中文，一句话说明与众不同之处）\n'
             '4. "keywords": 3-5个关键词（中英文混合，逗号分隔）\n\n'
             "【要求】极简、精准、不展开，只给最核心的信息。拿不准的标注「待核实」。"
+            "公式一律用 $...$ / $$...$$ 包裹，不要留裸 LaTeX。"
         ) + tail
         return prompt, 1500
 
@@ -658,7 +700,8 @@ def _build_summarize_prompt(depth, text):
             "- 专业术语首次出现中英文对照\n"
             "- 区分事实与分析，分析性内容前缀「分析：」\n"
             "- 拿不准的标注「待核实」，不要编造\n"
-            "- 批判性评价要具体，不要空泛"
+            "- 批判性评价要具体，不要空泛\n"
+            "- 公式一律用 $...$（行内）或 $$...$$（独立成行）包裹，不要留裸 LaTeX，前端会按 KaTeX 排版"
         ) + tail
         return prompt, 8000
 
@@ -684,7 +727,8 @@ def _build_summarize_prompt(depth, text):
             "- 专业术语首次出现时中英文对照（如「能动性（agency）」）\n"
             "- 区分事实与分析：事实直接陈述，分析性内容可前缀「分析：」\n"
             "- 拿不准的内容标注「待核实」，不要编造\n"
-            "- 数组字段每个元素是一句话，不要太长"
+            "- 数组字段每个元素是一句话，不要太长\n"
+            "- 公式一律用 $...$（行内）或 $$...$$（独立成行）包裹，不要留裸 LaTeX，前端会按 KaTeX 排版"
         ) + tail
         return prompt, 5000
 
@@ -1174,6 +1218,229 @@ def export_bibtex(ids=None):
         return {"ok": False, "error": "%s: %s" % (type(exc).__name__, str(exc))[:300]}
 
 
+# ===== 多格式文献引用导出（国标 / APA / MLA / Chicago / RIS / EndNote / CSL-JSON）=====
+def _split_author(name):
+    """"Wei Wang" -> ("Wang", "Wei")；"Wang Wei" 之类两词也按「末词为姓」处理。"""
+    parts = str(name or "").replace(",", " ").split()
+    if not parts:
+        return ("", "")
+    if len(parts) == 1:
+        return (parts[0], "")
+    return (parts[-1], " ".join(parts[:-1]))
+
+
+def _initials(given):
+    return " ".join("%s." % w[0].upper() for w in given.split() if w)
+
+
+def _authors_gb(authors):
+    """国标：姓 名首字母，3 位以上用 et al. / 等。"""
+    names = []
+    for a in authors[:3]:
+        fam, giv = _split_author(a)
+        ini = _initials(giv).replace(". ", " ").replace(".", "")
+        names.append((fam + (" " + ini if ini else "")).strip())
+    if len(authors) > 3:
+        names.append("et al")
+    return ", ".join(names)
+
+
+def _authors_apa(authors):
+    names = []
+    for a in authors[:20]:
+        fam, giv = _split_author(a)
+        names.append("%s, %s" % (fam, _initials(giv)) if giv else fam)
+    if len(authors) > 20:
+        fam_last, giv_last = _split_author(authors[-1])
+        tail = "%s, %s" % (fam_last, _initials(giv_last)) if giv_last else fam_last
+        return ", ".join(names) + ", ... " + tail
+    if not names:
+        return ""
+    if len(names) == 1:
+        return names[0]
+    return ", ".join(names[:-1]) + ", & " + names[-1]
+
+
+def _authors_mla(authors):
+    """MLA：第一位「姓, 名」，其余「名 姓」，超过 2 位用 and。"""
+    if not authors:
+        return ""
+    first = authors[0]
+    fam, giv = _split_author(first)
+    head = "%s, %s" % (fam, giv) if giv else fam
+    if len(authors) == 1:
+        return head
+    if len(authors) == 2:
+        fam2, giv2 = _split_author(authors[1])
+        return "%s, and %s" % (head, (giv2 + " " + fam2).strip())
+    return head + ", et al"
+
+
+def _year(rec):
+    return re.sub(r"[^0-9]", "", str(rec.get("year") or ""))
+
+
+def _pii(i, rec):
+    return {
+        "authors": [str(a) for a in (rec.get("authors") or []) if str(a).strip()],
+        "title": (rec.get("title") or rec.get("title_en") or "untitled").strip(),
+        "journal": (rec.get("journal") or "").strip(),
+        "year": _year(rec),
+        "doi": (rec.get("doi") or "").strip(),
+        "url": (rec.get("url") or "").strip(),
+    }
+
+
+def _cite_line(fmt, idx, rec):
+    p = _pii(idx, rec)
+    a = p["authors"]
+    t = p["title"]
+    j = p["journal"]
+    y = p["year"]
+    doi = p["doi"]
+    link = ("https://doi.org/" + doi) if doi else p["url"]
+
+    if fmt == "gb7714":
+        s = ""
+        if a:
+            s += _authors_gb(a) + ". "
+        s += t + " [J]. "
+        chunks = []
+        if j:
+            chunks.append(j)
+        if y:
+            chunks.append(y)
+        if chunks:
+            s += ", ".join(chunks) + ". "
+        if doi:
+            s += "DOI: " + doi
+        return ("[%d] " % (idx + 1)) + s.strip().rstrip(",") + "."
+
+    if fmt == "apa":
+        s = ""
+        if a:
+            s += _authors_apa(a) + " "
+        if y:
+            s += "(%s). " % y
+        s += t + ". "
+        if j:
+            s += j + ". "
+        if doi:
+            s += "https://doi.org/" + doi
+        return s.strip()
+
+    if fmt == "mla":
+        s = ""
+        if a:
+            s += _authors_mla(a) + ". "
+        s += '"%s." ' % t
+        if j:
+            s += j + ", "
+        if y:
+            s += y + ". "
+        if doi:
+            s += "doi:" + doi + "."
+        return s.strip()
+
+    if fmt == "chicago":
+        s = ""
+        if a:
+            s += _authors_mla(a) + ". "
+        s += '"%s." ' % t
+        if j:
+            s += j + " "
+        if y:
+            s += "(%s). " % y
+        if doi:
+            s += "https://doi.org/" + doi + "."
+        return s.strip()
+
+    if fmt == "ris":
+        lines = ["TY  - JOUR" if j else "TY  - GEN"]
+        for name in a:
+            fam, giv = _split_author(name)
+            lines.append("AU  - %s, %s" % (fam, giv) if giv else "AU  - " + fam)
+        lines.append("TI  - " + t)
+        if j:
+            lines.append("JO  - " + j)
+        if y:
+            lines.append("PY  - " + y)
+        if doi:
+            lines.append("DO  - " + doi)
+        if link:
+            lines.append("UR  - " + link)
+        lines.append("ER  - ")
+        return "\n".join(lines)
+
+    if fmt == "endnote":
+        lines = ["%0 " + ("Journal Article" if j else "Generic")]
+        for name in a:
+            fam, giv = _split_author(name)
+            lines.append("%A " + (fam + ", " + giv if giv else fam))
+        lines.append("%T " + t)
+        if j:
+            lines.append("%J " + j)
+        if y:
+            lines.append("%D " + y)
+        if doi:
+            lines.append("%R " + doi)
+        if link:
+            lines.append("%U " + link)
+        return "\n".join(lines)
+
+    if fmt == "csljson":
+        return json.dumps({
+            "type": "article-journal" if j else "document",
+            "title": t,
+            "author": [{"family": _split_author(n)[0], "given": _split_author(n)[1]} for n in a],
+            "container-title": j,
+            "issued": {"date-parts": [[int(y)]]} if y else None,
+            "DOI": doi,
+            "URL": link,
+        }, ensure_ascii=False)
+
+    return t
+
+
+def export_citations(ids=None, fmt="gb7714"):
+    """按指定格式导出摘要卡片库（ids 为空导出全部）。"""
+    try:
+        _ensure_summaries_dir()
+        entries = []
+        for fname in os.listdir(SUMMARIES_DIR):
+            if not fname.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(SUMMARIES_DIR, fname), "r", encoding="utf-8") as f:
+                    rec = json.load(f)
+            except Exception:
+                continue
+            if ids is not None and rec.get("id") not in ids:
+                continue
+            entries.append(rec)
+        if not entries:
+            return {"ok": False, "error": "没有可导出的文献"}
+        entries.sort(key=lambda r: r.get("created_at", ""))
+        fmt = (fmt or "gb7714").strip().lower()
+        if fmt == "bibtex":
+            r = export_bibtex(ids)
+            if r.get("ok"):
+                r["text"] = r.get("bibtex")
+            return r
+        if fmt == "csljson":
+            items = [_cite_line(fmt, 0, rec) for rec in entries]
+            return {"ok": True, "count": len(items),
+                    "text": "[\n" + ",\n".join(items) + "\n]\n"}
+        if fmt in ("ris", "endnote"):
+            sep = "\n\n"
+            body = sep.join(_cite_line(fmt, i, rec) for i, rec in enumerate(entries))
+            return {"ok": True, "count": len(entries), "text": body + "\n"}
+        body = "\n\n".join(_cite_line(fmt, i, rec) for i, rec in enumerate(entries))
+        return {"ok": True, "count": len(entries), "fmt": fmt, "text": body + "\n"}
+    except Exception as exc:
+        return {"ok": False, "error": "%s: %s" % (type(exc).__name__, str(exc))[:300]}
+
+
 def suggest_summary_tags(summary_id):
     """用 summarize 模型读摘要内容，建议 3-5 个主题标签。
     返回 {ok, tags: [...]}；一次 LLM 调用，成本极低。"""
@@ -1253,12 +1520,40 @@ def _ensure_translations_dir():
     os.makedirs(TRANSLATIONS_DIR, exist_ok=True)
 
 
-def _translation_title(job_dir, fallback, prefer=("translation.md", "result.md")):
-    """取标题：优先指定文件的首行（中文），退回转写结果首行，再退回文件名。
+# 期刊页眉 / 章节名 / 版式标签：这些行长得像标题，但都不是论文标题
+_JUNK_TITLE_RE = re.compile(
+    r"(?i)^(?:original\s+article|research\s+article|review\s+article|article|"
+    r"abstract|introduction|conclusion[s]?|discussion|methods?|results?|"
+    r"references?|bibliography|acknowledg(e)?ments?|contents|preface|"
+    r"论文|正文|摘要|引言|绪论|结论|参考文献|目录|收稿日期|日期)"
+)
+# 形如「1 Introduction」「2.3 Model」「一、引言」的编号小节标题
+_JUNK_TITLE_RE2 = re.compile(r"^(?:\d+(?:\s*\.\s*\d+)*\s*|第?[一二三四五六七八九十]+[、\.\s])\S")
 
-    prefer 决定先看哪个文件 —— 译文库要 translation.md（中文标题），
-    精读库要 reading.md（精读稿首行也是中文标题），否则会拿到 result.md
-    的英文原标题，与库里的其余中文标题不搭。
+
+def _looks_like_junk_title(s):
+    s = (s or "").strip()
+    if not s:
+        return True
+    if _JUNK_TITLE_RE.match(s):
+        return True
+    if _JUNK_TITLE_RE2.match(s) and len(s) <= 40:
+        return True
+    # 纯作者行：一串人名，不含句子成分
+    if len(s) <= 30 and re.match(r"^[A-Z][a-zA-Z.\-]+(?:,\s*[A-Z][a-zA-Z.\-]+)*$", s):
+        return True
+    return False
+
+
+def _translation_title(job_dir, fallback, prefer=("translation.md", "result.md")):
+    """取论文标题：沿 prefer 顺序扫标题行，跳过期刊页眉/章节名这类伪标题。
+
+    踩过的坑：早年实现取「第一个非空行」，于是 Elsevier 排版稿拿到
+    「ORIGINAL ARTICLE」、精读稿拿到「1 Introduction」——用户看到的就是
+    一条没有题目的记录。现在按下面的顺序取，取到即停：
+      1. 各文件里第一个像标题的 Markdown 标题行（# ~ ###）或首段长句；
+      2. PDF 自身元数据里的 Title（pymupdf 读，很多出版商写了真标题）；
+      3. fallback（通常是从文件名剥掉时间戳后的论文名）。
     """
     for fname in prefer:
         p = os.path.join(job_dir, fname)
@@ -1266,15 +1561,37 @@ def _translation_title(job_dir, fallback, prefer=("translation.md", "result.md")
             continue
         try:
             with open(p, "r", encoding="utf-8") as f:
+                checked = 0
                 for line in f:
                     line = line.strip()
-                    if not line:
+                    if not line or line.startswith(">") or line.startswith("!["):
                         continue
+                    checked += 1
+                    if checked > 40:
+                        break
+                    head = line.lstrip("#").strip() if line.startswith("#") else line
                     if line.startswith("#"):
-                        return line.lstrip("#").strip()[:120]
-                    return line[:80]
+                        if _looks_like_junk_title(head):
+                            continue
+                        return head[:120]
+                    # 非标题行一律不当作标题：正文首句常常是半句话或作者行，
+                    # 采信它就会出现「没有题目」的观感（这一条是踩过的坑）
+                    continue
         except Exception:
             continue
+    # PDF 元数据兜底
+    try:
+        pdf = os.path.join(job_dir, "input.pdf")
+        if os.path.isfile(pdf):
+            import fitz
+            doc = fitz.open(pdf)
+            meta = doc.metadata or {}
+            doc.close()
+            cand = (meta.get("title") or "").strip()
+            if cand and len(cand) >= 12 and not _looks_like_junk_title(cand):
+                return cand[:120]
+    except Exception:
+        pass
     return fallback
 
 
@@ -1455,6 +1772,7 @@ def save_reading(job_id, markdown):
             return {"ok": False, "error": "精读内容为空，拒绝写入"}
         with open(os.path.join(job_dir, "reading.md"), "w", encoding="utf-8") as f:
             f.write(markdown)
+        sanitize_math_md(os.path.join(job_dir, "reading.md"))
         return {"ok": True, "chars": len(markdown)}
     except Exception as exc:
         return {"ok": False, "error": "%s: %s" % (type(exc).__name__, str(exc))[:300]}
@@ -1787,6 +2105,13 @@ def _run_reading(job_id, token):
             return
 
         full = _restore_images("\n\n".join([r for r in results if r]).strip(), mapping)
+        # 抬头：分块生成的稿子各自看不到全文，容易一开篇就是「引言」；先垫一块全文速览
+        try:
+            ov = llm_overview(md[:9000])
+            if ov.get("ok") and (ov.get("overview") or "").strip():
+                full = ov["overview"].strip() + "\n\n" + full
+        except Exception:
+            pass   # 速览失败不影响正文精读
         saved = save_reading(job_id, full)
         if not saved.get("ok"):
             raise RuntimeError(saved.get("error") or "写入精读失败")
@@ -2011,10 +2336,11 @@ def llm_annotate(text):
     if not text or not text.strip():
         return {"ok": True, "annotated": "", "model": "", "tokens": 0}
     prompt = (
-        "你在帮一位 AI × 生物学方向的博士生做「原文精读」。下面是一段论文正文（英文 Markdown）。\n"
+        "你在帮一位研究生做「原文精读」。"
+        "下面是一段论文正文（英文 Markdown）。\n"
         "请做成逐段对照的精读稿：原文 → 译文 → 该段的解读。\n\n"
         "【输出格式】严格照这个结构，不要加任何额外内容：\n\n"
-        "## <章节小标题，中文；原文这一段没有标题就省略这一行>\n\n"
+        "## <章节小标题，中文>\n\n"
         "> <原文段落，逐字保留>\n\n"
         "<这一段的中文翻译>\n\n"
         "**解读** <这一段值得停一下的地方：关键概念、方法思路、隐含前提、术语译法、对读者的意义。2-4 句，说人话，不要复述译文>\n\n"
@@ -2023,10 +2349,15 @@ def llm_annotate(text):
         "2. 每一段原文后面紧跟它的译文和解读，不要把译文集中堆到最后\n"
         "3. 图片占位符 [[IMG:数字]] 原样保留，不翻译、不删除、不移动位置\n"
         "4. 公式（$...$、$$...$$）、代码块、URL、纯数字与单位原样保留\n"
-        "5. 术语首次出现时在中文后括注英文，例如「可供性（affordance）」\n"
-        "6. 解读只挑真正重要的段落写，普通段落直接跳过；宁可少而精，不要每段都写\n"
-        "7. 不要写前言、总述、结语，不要输出推理过程，直接输出精读稿正文\n"
-        "8. 中文用学术但好读的语气，不要空话套话\n\n"
+        "   原文里没带 $ 定界符的裸公式，请补成 $...$（多行补 $$...$$），否则前端排版不出来\n"
+        "5. 术语首次出现时在中文后括注英文，例如「挠曲电（flexoelectric）」\n"
+        "6. 【深度要求】这一段里至少写 3 条解读，且必须覆盖：出现公式的地方（这个公式在算什么、"
+        "为什么这么写）、实验/仿真的设置或材料参数、作者给出的关键结论。"
+        "只把章节标题翻译一遍、不给解读，是不合格的输出。\n"
+        "7. 章节小标题用中文并保留原编号（如「3.2 磁驱动建模」）；如果这一段开头就是 "
+        "「1 Introduction / Introduction」之类，标题写成「引言」而不是留英文原文\n"
+        "8. 不要写前言、总述、结语，不要输出推理过程，直接输出精读稿正文\n"
+        "9. 中文用学术但好读的语气，不要空话套话\n\n"
         "待精读的正文：\n" + text
     )
     try:
@@ -2043,6 +2374,47 @@ def llm_annotate(text):
         content = re.sub(r"\n-+\s*$", "", content)
         usage = result.get("usage", {})
         return {"ok": True, "annotated": content.strip(),
+                "model": result.get("model", ""), "tokens": usage.get("total_tokens", 0)}
+    except Exception as exc:
+        return {"ok": False, "error": "%s: %s" % (type(exc).__name__, str(exc))[:300]}
+
+
+def llm_overview(text):
+    """生成精读稿开头的「论文速览」块。
+
+    精读是分块并行生成的，各块互相看不见，拼起来很容易一开篇就是「引言」，
+    看着像只精读了 Introduction。这里用全文开头单独生成一块速览垫在最前面，
+    保证每篇精读都有：标题、一句话定位、研究问题、方法、结论、与本方向的关联。
+    """
+    if not text or not text.strip():
+        return {"ok": True, "overview": "", "model": "", "tokens": 0}
+    prompt = (
+        "你在给一位研究生写论文速览。下面是论文开头部分（英文 Markdown）。\n\n"
+        "【输出格式】严格照这个结构，用中文，不要额外内容、不要推理过程：\n\n"
+        "## 论文速览\n\n"
+        "- **一句话定位**：这篇论文在做一件什么事（不超过 40 字）\n"
+        "- **研究问题**：它要解决的具体问题或缺口\n"
+        "- **方法与模型**：用了什么手段（理论 / 数值 / 实验 /  fabrication），关键假设是什么\n"
+        "- **主要结论**：作者给出的结果与量级（有数据就写数据）\n"
+        "- **与我的方向的关系**：对读者自己的研究领域有什么用，能不能借方法或借结论\n\n"
+        "【规则】\n"
+        "1. 只写你从给定文本里真能看出来的内容；看不出来的写「原文未明确」，不要编\n"
+        "2. 公式与符号用 $...$ 包裹\n"
+        "3. 每条不超过两行，不要抄摘要原文\n\n"
+        "论文开头：\n" + text
+    )
+    try:
+        result, err = _llm_chat([{"role": "user", "content": prompt}], max_tokens=1200,
+                                temperature=0.3, model=_get_task_model("annotate"),
+                                no_thinking=True)
+        if err:
+            return {"ok": False, "error": err}
+        content = result["choices"][0]["message"]["content"].strip()
+        if content.startswith("```"):
+            content = re.sub(r"^```(?:markdown)?\s*", "", content)
+            content = re.sub(r"\s*```$", "", content)
+        usage = result.get("usage", {})
+        return {"ok": True, "overview": content.strip(),
                 "model": result.get("model", ""), "tokens": usage.get("total_tokens", 0)}
     except Exception as exc:
         return {"ok": False, "error": "%s: %s" % (type(exc).__name__, str(exc))[:300]}
@@ -2462,6 +2834,13 @@ class WorkerHandler(BaseHTTPRequestHandler):
             job_id = q.get("jobId", [""])[0]
             with JOBS.lock:
                 job = dict(JOBS.jobs[job_id]) if job_id in JOBS.jobs else None
+            if not job and job_id:
+                # 磁盘兜底：worker 重启后内存任务表为空，但结果已落盘的旧任务仍要能读
+                # （否则刷新页面就整片「任务不存在」，转写结果卡空着）
+                job_dir = os.path.join(JOBS_DIR, job_id)
+                if os.path.isfile(os.path.join(job_dir, "result.md")):
+                    job = {"jobId": job_id, "dir": job_dir, "status": "done",
+                           "engine": "", "images": _images_on_disk(job_dir)}
             if not job:
                 return self._json(404, {"ok": False, "error": "任务不存在"})
             md_path = os.path.join(job["dir"], "result.md")
@@ -2708,6 +3087,27 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 return self._json(404, {"ok": False, "error": "任务不存在"})
             return self._json(200, save_summary(job, summary_data))
 
+        if path == "/api/pdf/summary/delete":
+            try:
+                body = json.loads(self._read_body().decode("utf-8") or "{}")
+            except Exception:
+                return self._json(400, {"ok": False, "error": "请求体不是合法 JSON"})
+            sid = str(body.get("id", "")).strip()
+            if not sid:
+                return self._json(400, {"ok": False, "error": "缺少摘要 id"})
+            safe = os.path.basename(sid).replace(".json", "")
+            fpath = os.path.join(SUMMARIES_DIR, safe + ".json")
+            if not safe or not os.path.isfile(fpath):
+                return self._json(404, {"ok": False, "error": "摘要不存在"})
+            try:
+                os.remove(fpath)
+                md = os.path.join(SUMMARIES_DIR, safe + ".md")
+                if os.path.isfile(md):
+                    os.remove(md)
+            except Exception as exc:
+                return self._json(500, {"ok": False, "error": str(exc)})
+            return self._json(200, {"ok": True, "id": safe})
+
         if path == "/api/pdf/summary/tags":
             try:
                 body = json.loads(self._read_body().decode("utf-8") or "{}")
@@ -2797,6 +3197,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 return self._json(404, {"ok": False, "error": "任务目录不存在"})
             with open(os.path.join(job_dir, "translation.md"), "w", encoding="utf-8") as f:
                 f.write(translated)
+            sanitize_math_md(os.path.join(job_dir, "translation.md"))
             return self._json(200, {"ok": True, "saved": True})
 
         # 注意：/api/pdf/translation/save 已存在（前端翻译完成后把正文写入
@@ -2837,6 +3238,13 @@ class WorkerHandler(BaseHTTPRequestHandler):
             except Exception:
                 return self._json(400, {"ok": False, "error": "请求体不是合法 JSON"})
             return self._json(200, quick_add_summary(body))
+
+        if path == "/api/pdf/summaries/cite":
+            try:
+                body = json.loads(self._read_body().decode("utf-8") or "{}")
+            except Exception:
+                return self._json(400, {"ok": False, "error": "请求体不是合法 JSON"})
+            return self._json(200, export_citations(body.get("ids"), body.get("fmt") or "gb7714"))
 
         if path == "/api/pdf/summaries/bibtex":
             try:

@@ -52,3 +52,29 @@ pdf_worker/test_output_cloud/
 .idea/
 data_snapshots/
 _archives/
+
+# ============================================================
+#  本地开发残留（调试期产生的临时文件，一律不入库）
+# ============================================================
+check_*.txt
+check_*.json
+shot_*.png
+pdf-panel*.png
+*.log
+server.out.log
+server.err.log
+.edg[ee]*/
+tmp_*.py
+probe_*.js
+
+# 面板运行期产生的个人数据（缓存 / 积分 / 队列 / 毕业进度）
+data/ablesci_points.json
+data/ablesci_queue.json
+data/ablesci_daily.log
+data/graduation_track.json
+data/library_groups.json
+data/entry_names.json
+data/brief_cache.json
+data/feed_cache_d1.json
+data/feed_cache_d2.json
+data/literature/*.local.json

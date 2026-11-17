@@ -573,9 +573,14 @@ html, body {
 .panels { position: relative; }
 .panel {
   display: none;
-  animation: panelIn 0.4s cubic-bezier(0.22, 1, 0.36, 1);
 }
+/* 面板切换不做透明度淡入：动画在后台标签页/节流时会卡在 opacity:0，
+   表现为「切到这一页却是空的」。改成纯显示切换，任何环境都不会空白。 */
 .panel.active { display: block; }
+@keyframes panelIn {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
 @keyframes panelIn {
   from { opacity: 0; transform: translateY(12px); }
   to { opacity: 1; transform: translateY(0); }
@@ -641,7 +646,12 @@ html, body {
 .grid-3 .card { margin-bottom: 0; text-align: center; padding: 28px 20px; }
 
 /* ===== 博士进度大卡 ===== */
-.card-phd { text-align: center; }
+.card-phd {
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
 .phd-big {
   display: flex;
   align-items: baseline;
@@ -705,6 +715,22 @@ html, body {
   font-size: 13px;
   color: var(--text-secondary);
 }
+
+/* 进度卡文字放大（只作用于这一张卡，卡片拉高后小字显得偏小） */
+.card-phd .card-label {
+  font-size: 17px;
+  letter-spacing: 2px;
+  margin-bottom: 20px;
+}
+.card-phd .phd-meta {
+  font-size: 16px;
+  gap: 22px;
+}
+.card-phd .phd-days {
+  margin-top: 16px;
+  font-size: 17px;
+  line-height: 1.65;
+}
 .phd-days strong { color: var(--amber); font-family: var(--font-mono); }
 
 /* ===== 统计卡 ===== */
@@ -752,11 +778,14 @@ html, body {
 
 .todo-input-row {
   display: flex;
+  flex-wrap: wrap;          /* 页面放大/窄窗口时换行，而不是把按钮挤出卡片 */
   gap: 10px;
   margin-bottom: 20px;
 }
 .todo-input {
-  flex: 1;
+  flex: 1 1 160px;
+  min-width: 0;             /* 关键：不写的话 input 的固有宽度让 flex 收缩失效，整行必然溢出 */
+  max-width: 100%;
   padding: 11px 16px;
   background: var(--input-bg);
   border: 1px solid var(--card-border);
@@ -1019,6 +1048,29 @@ html, body {
   color: var(--text-secondary);
 }
 .section-stats span { font-family: var(--font-mono); color: var(--accent); }
+
+/* 板块内最近文件（可直接点击用默认程序打开） */
+.section-files {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.section-file {
+  font-size: 12px;
+  color: var(--text-secondary);
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: var(--surface-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: all .15s ease;
+}
+.section-file:hover {
+  color: var(--accent);
+  background: var(--surface-3);
+}
 
 /* ===== 研究日志 ===== */
 .journal-mini { display: flex; flex-direction: column; gap: 12px; }
@@ -1768,6 +1820,66 @@ html, body {
   flex: 1;
 }
 
+/* 毕业要求 · 论文之外的硬性环节 */
+.grad-track {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--surface-3);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.grad-track-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  border: none;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  transition: color .15s ease;
+}
+.grad-track-item:hover { color: var(--text); }
+.grad-track-dot {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  /* 空心圈要看得见：原先 1px 淡描边几乎不可见，改成 accent 描边 + 浅底 */
+  border: 2px solid var(--accent);
+  background: var(--accent-dim, rgba(46,125,96,.12));
+  opacity: .85;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  line-height: 1;
+  color: transparent;
+  transition: transform .12s ease, background .15s ease;
+}
+.grad-track-item:hover .grad-track-dot { transform: scale(1.08); }
+.grad-track-item.done .grad-track-dot {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+  opacity: 1;
+}
+.grad-track-label { flex: 1 1 auto; }
+.grad-track-item.done .grad-track-label {
+  text-decoration: line-through;
+  opacity: .65;
+}
+.grad-track-note {
+  flex: 0 0 auto;
+  font-size: 11px;
+  opacity: .75;
+}
+
 /* 毕业条件通用样式 */
 .graduation-bar {
   height: 6px;
@@ -2078,18 +2190,22 @@ html, body {
 }
 .timeline-dot {
   position: absolute;
-  left: -32px;
-  top: 20px;
-  width: 12px;
-  height: 12px;
-  background: var(--card-bg);
-  border: 2.5px solid var(--accent);
+  left: -19px;
+  top: 22px;
+  width: 9px;
+  height: 9px;
+  /* 原先 12px 空心圈 + 2.5px 描边独立悬在左边，观感很突兀；
+     改成贴合竖线的小实心点，hover 才扩散一点光晕 */
+  background: var(--accent);
+  border: 0;
   border-radius: 50%;
   z-index: 1;
-  transition: all 0.25s ease;
+  opacity: .9;
+  transition: box-shadow 0.25s ease, transform 0.25s ease;
 }
 .timeline-item:hover .timeline-dot {
   background: var(--accent);
+  transform: scale(1.25);
   box-shadow: 0 0 0 4px var(--accent-dim);
 }
 
@@ -2955,11 +3071,25 @@ html, body {
 .pdf-summary-body p { font-size: 14px; line-height: 1.8; color: var(--text-primary); }
 .pdf-kw-tag {
   display: inline-block;
-  padding: 3px 12px; margin: 3px 6px 3px 0;
-  font-size: 12px; font-weight: 500;
+  padding: 4px 13px; margin: 0;
+  font-size: 12.5px; font-weight: 600; letter-spacing: 0.2px;
   color: var(--accent);
-  background: var(--accent-soft);
+  background: var(--accent-dim);
+  border: 1px solid var(--accent-glow);
   border-radius: 999px;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.pdf-kw-tag:hover { background: var(--accent-glow); }
+
+/* 关键词区块：整行居中、等间距、换行对齐 */
+.kw-chips {
+  display: flex; flex-wrap: wrap;
+  justify-content: center; align-items: center;
+  gap: 9px; margin: 12px 0 20px;
+}
+@media (max-width: 560px) {
+  .kw-chips { gap: 7px; margin: 10px 0 16px; }
+  .kw-chips .pdf-kw-tag { font-size: 12px; padding: 4px 11px; }
 }
 
 /* ===== 结构化文献精读摘要 ===== */
@@ -3144,9 +3274,10 @@ html, body {
   background: var(--accent); color: #fff; border-color: var(--accent);
 }
 
+/* 一条一条占满整行（原来 auto-fill 两列，卡片只占一半，分组/改名/删除挤在一起看不清） */
 .sum-card-list {
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
-  gap: 16px;
+  display: grid; grid-template-columns: 1fr;
+  gap: 12px;
 }
 .sum-card {
   background: var(--surface-1);
@@ -3159,10 +3290,15 @@ html, body {
   box-shadow: 0 4px 16px rgba(0,0,0,0.08);
   border-color: var(--accent);
 }
+/* 卡片头：徽标/日期在左，分组·改名·删除三个小标志整体靠右 */
 .sum-card-header {
-  display: flex; justify-content: space-between; align-items: center;
-  margin-bottom: 10px;
+  display: flex; justify-content: flex-start; align-items: center;
+  gap: 6px; flex-wrap: nowrap;
+  margin-bottom: 8px;
 }
+.sum-card-header .sum-card-date { margin-right: auto; }
+.sum-card-header .sum-card-grp { margin-left: 0; min-width: 150px; max-width: 280px; text-align: center; padding: 4px 14px; }
+.sum-card-ren, .sum-card-del, .trans-ren-btn, .trans-del-btn { margin-left: 2px; }
 .sum-card-depth {
   font-size: 11px; font-weight: 700; padding: 3px 10px; border-radius: 4px;
 }
@@ -3546,7 +3682,7 @@ html, body {
 
 .panels { position: relative; }
 .panel { animation: none; }
-.panel.active { animation: panelIn 0.5s var(--ease) both; }
+.panel.active { animation: none; }   /* 面板切换不用透明度/位移动画：动画被节流或暂停时会卡在 opacity:0，整页看起来是空的 */
 
 .card {
   background: var(--glass);
@@ -4169,12 +4305,13 @@ input:focus, textarea:focus, select:focus {
    ============================================================================ */
 
 @keyframes riseIn {
-  from { opacity: 0; transform: translateY(16px) scale(0.986); filter: blur(7px); }
-  to   { opacity: 1; transform: none; filter: none; }
+  from { transform: translateY(10px); }
+  to   { transform: none; }
 }
 .panel.active .card,
 .panel.active .stat-card {
-  animation: riseIn 0.62s var(--ease) backwards;
+  /* 只做位移入场，不用 opacity：动画被节流/暂停时卡在 opacity:0 会让整页看起来是空的 */
+  animation: riseIn 0.42s var(--ease) backwards;
 }
 
 /* 主题切换：从按钮位置扩开的圆形揭示 */
@@ -5003,6 +5140,7 @@ a.hs-item { text-decoration: none; color: inherit; }
 .today-todo, .today-feed, .today-paper {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   padding: 7px 8px;
   margin: 0 -8px;
@@ -5029,6 +5167,15 @@ a.hs-item { text-decoration: none; color: inherit; }
   color: var(--text-muted);
   margin-left: auto;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.today-feed-extra {
+  flex: 0 0 100%;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-faint, var(--text-muted));
+  opacity: .8;
+  padding-left: 2px;
+  margin-top: 2px;
 }
 .today-new {
   font-size: 10px;
@@ -5102,9 +5249,9 @@ a.hs-item { text-decoration: none; color: inherit; }
   font-weight: 700;
   line-height: 1.45;
   color: var(--text);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  /* 论文题目一律写全，不再用省略号截断 */
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 .pdf-result-meta {
   margin-top: 4px;
@@ -5318,6 +5465,86 @@ a.hs-item { text-decoration: none; color: inherit; }
   transition: color var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease);
 }
 .news-quick-add-btn:hover { color: var(--accent); border-color: var(--accent); }
+
+/* 科研通求助：和「收录」同款按钮，但用强调色描边，一眼能认出是下载入口 */
+.news-ablesci-btn {
+  margin-left: 6px;
+  font-size: 11px;
+  font-family: var(--font-sans);
+  color: var(--accent);
+  background: var(--glass-strong);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  padding: 2px 10px;
+  cursor: pointer;
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+.news-ablesci-btn:hover { background: var(--accent); color: #fff; }
+
+/* 已入队：换成虚线灰底 + 呼吸点，表示「这单已经派给巡检了」 */
+.news-ablesci-btn.is-queued {
+  color: var(--muted, #6b7280);
+  border: 1px dashed var(--accent);
+  background: var(--accent-dim);
+  cursor: default;
+}
+.news-ablesci-btn.is-queued::before {
+  content: '';
+  display: inline-block;
+  width: 5px; height: 5px;
+  margin-right: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: ablesciPulse 1.6s ease-in-out infinite;
+}
+@keyframes ablesciPulse {
+  0%, 100% { opacity: 0.25; transform: scale(0.85); }
+  50% { opacity: 1; transform: scale(1); }
+}
+
+/* 资讯面板顶部的求助队列状态条 */
+.ablesci-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 12px;
+  padding: 8px 14px;
+  font-size: 12.5px;
+  font-family: var(--font-sans);
+  color: var(--muted, #6b7280);
+  background: var(--glass-strong);
+  border: 1px solid var(--line, rgba(0, 0, 0, 0.08));
+  border-left: 3px solid var(--accent);
+  border-radius: 10px;
+}
+.ablesci-chip {
+  font-size: 12px;
+  padding: 1px 9px;
+  border-radius: 999px;
+  color: var(--accent);
+  background: var(--accent-dim);
+  border: 1px solid var(--accent);
+  white-space: nowrap;
+}
+.ablesci-chip.idle { color: var(--muted, #6b7280); border-color: var(--line, rgba(0, 0, 0, 0.12)); background: transparent; }
+.ablesci-hint { color: var(--muted, #6b7280); }
+.ablesci-done { color: var(--fg-soft, #4b5563); }
+
+/* 条目上的 DOI 徽标，点一下即复制 */
+.news-doi {
+  font-family: var(--font-mono, var(--font-sans));
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--glass-strong);
+  border: 1px solid var(--edge-outer);
+  border-radius: 999px;
+  padding: 2px 9px;
+  cursor: pointer;
+  user-select: all;
+  transition: color var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease);
+}
+.news-doi:hover { color: var(--accent); border-color: var(--accent); }
 
 /* ---------- 四、待办「专注」按钮 ---------- */
 .todo-card-pomo {
@@ -5613,17 +5840,18 @@ a.hs-item { text-decoration: none; color: inherit; }
 .pdf-upload-card > #pdfDropzone {
   grid-column: 1;
   grid-row: 2 / span 2;
-  margin-top: 10px;
+  margin-top: 0;
   display: flex;
   flex-direction: column;
   justify-content: center;
+  align-items: center;
   align-self: stretch;
   min-height: 150px;
+  padding-top: 0;
 }
-.pdf-upload-card > .pdf-engine-row {
-  grid-column: 2;
-  margin-top: 10px;
-}
+/* 上传卡整体上提：标题与拖拽区之间不再留一大截空白 */
+.pdf-upload-card { padding-top: 16px; }
+.pdf-upload-card > .pdf-engine-row { grid-column: 2; margin-top: 0; }
 .pdf-upload-card > .pdf-action-row { grid-column: 2; }
 /* 通栏后引擎卡不必再挤最小宽度 */
 .pdf-upload-card .pdf-engine-opt { min-width: 0; }
@@ -5691,6 +5919,7 @@ a.hs-item { text-decoration: none; color: inherit; }
    V19 · 译文库（列表 + 详情）
    ========================================================================== */
 .trans-list { display: flex; flex-direction: column; gap: 10px; }
+.trans-item-main { min-width: 0; flex: 1 1 auto; }
 .trans-item {
   display: flex;
   align-items: center;
@@ -5727,7 +5956,9 @@ a.hs-item { text-decoration: none; color: inherit; }
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
-.trans-item .hs-item-arrow { flex: 0 0 auto; }
+.trans-item .hs-item-arrow { flex: 0 0 auto; margin-left: auto; }
+/* 右侧操作簇宽度固定：分组 / 改名 / 删除 每行都落在同一条竖线上 */
+.trans-grp-btn { min-width: 86px; text-align: center; }
 .trans-detail-meta {
   display: flex;
   gap: 14px;
@@ -6067,14 +6298,20 @@ body:has(.read-task:not([hidden])) .pomo-timer { bottom: 152px; }
   display: grid;
   grid-template-columns: minmax(0, 1fr) 330px;
   gap: 20px;
-  align-items: start;
+  align-items: stretch;
   margin-bottom: 20px;
 }
 @media (max-width: 1180px) { .focus-grid { grid-template-columns: 1fr; } }
 .focus-side { display: flex; flex-direction: column; gap: 20px; }
 
 /* ---------- 一、计时舞台 ---------- */
-.focus-stage { display: flex; flex-direction: column; align-items: center; padding: 30px 24px 26px; }
+.focus-stage {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 30px 24px 26px;
+}
 
 .focus-ring-wrap {
   position: relative;
@@ -6392,3 +6629,1040 @@ body:has(.read-task:not([hidden])) .pomo-timer { bottom: 152px; }
   .focus-bar-label, .focus-bar-val { display: none; }
   .focus-bars { height: 120px; }
 }
+
+/* ===== 摘要卡片：删除按钮 ===== */
+.sum-card-del {
+  margin-left: 8px;
+  font-size: 11px;
+  font-family: var(--font-sans);
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--line, rgba(0, 0, 0, 0.12));
+  border-radius: 999px;
+  padding: 1px 9px;
+  cursor: pointer;
+  transition: color var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease);
+}
+.sum-card-del:hover { color: #B91C1C; border-color: #B91C1C; }
+.sum-card-del:disabled { opacity: 0.6; cursor: default; }
+
+/* ===== 资讯：求助队列列表 ===== */
+.ablesci-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.ablesci-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ablesci-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  font-size: 12px;
+  border-radius: 8px;
+  background: var(--surface-2, rgba(0, 0, 0, 0.02));
+}
+.ablesci-item.pending { border-left: 2px solid var(--accent); }
+.ablesci-item.done, .ablesci-item.skip { opacity: 0.72; }
+.ablesci-item.failed { border-left: 2px solid #D97706; }
+.ablesci-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--accent);
+  flex: none;
+  animation: ablesciPulse 1.6s ease-in-out infinite;
+}
+.ablesci-ic { flex: none; }
+.ablesci-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+.ablesci-meta { flex: none; color: var(--text-muted); font-size: 11px; }
+.ablesci-cancel {
+  flex: none;
+  font-size: 11px;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--line, rgba(0, 0, 0, 0.12));
+  border-radius: 999px;
+  padding: 1px 8px;
+  cursor: pointer;
+}
+.ablesci-cancel:hover { color: #B91C1C; border-color: #B91C1C; }
+
+/* ===== PDF 转写：文献库 PDF 列表 ===== */
+.pdf-inbox-card .card-label { display: flex; align-items: center; justify-content: space-between; }
+.pdf-inbox-refresh {
+  font-size: 11px;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--line, rgba(0, 0, 0, 0.12));
+  border-radius: 999px;
+  padding: 1px 9px;
+  cursor: pointer;
+}
+.pdf-inbox-refresh:hover { color: var(--accent); border-color: var(--accent); }
+.pdf-inbox-hint { font-size: 11.5px; color: var(--text-muted); margin: 2px 0 8px; }
+.pdf-inbox-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.pdf-inbox-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  font-size: 12px;
+  border-radius: 8px;
+  background: var(--surface-2, rgba(0, 0, 0, 0.02));
+}
+.pdf-inbox-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+.pdf-inbox-meta { flex: none; font-size: 11px; color: var(--text-muted); }
+.pdf-inbox-go {
+  flex: none;
+  font-size: 11px;
+  color: var(--accent);
+  background: transparent;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  padding: 1px 10px;
+  cursor: pointer;
+}
+.pdf-inbox-go:hover { background: var(--accent); color: #fff; }
+
+/* ===== 分组条（摘要卡片 / 译文库 / 精读库 共用）===== */
+.grp-bar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  margin: 10px 0 4px;
+}
+.grp-chip-wrap { display: inline-flex; align-items: center; gap: 2px; }
+.grp-chip {
+  font-size: 11.5px;
+  font-family: var(--font-sans);
+  color: var(--text-muted);
+  background: var(--surface-2, rgba(0, 0, 0, 0.03));
+  border: 1px solid transparent;
+  border-radius: 999px;
+  padding: 2px 10px;
+  cursor: pointer;
+  transition: color var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
+}
+.grp-chip:hover { color: var(--text); border-color: var(--line, rgba(0,0,0,0.12)); }
+.grp-chip.active { color: var(--accent); border-color: var(--accent); background: transparent; }
+.grp-chip .grp-count { opacity: 0.65; font-size: 10.5px; }
+.grp-chip.grp-new { border: 1px dashed var(--line, rgba(0,0,0,0.16)); background: transparent; }
+.grp-del {
+  font-size: 10px;
+  line-height: 1;
+  width: 15px; height: 15px;
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  opacity: 0.55;
+}
+.grp-del:hover { color: #B91C1C; opacity: 1; }
+
+/* 条目上的「＋分组」按钮 */
+.sum-card-grp, .trans-grp-btn {
+  margin-left: 6px;
+  font-size: 11px;
+  font-family: var(--font-sans);
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--line, rgba(0,0,0,0.12));
+  border-radius: 999px;
+  padding: 2px 10px;
+  cursor: pointer;
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.sum-card-grp:hover, .trans-grp-btn:hover { color: var(--accent); border-color: var(--accent); }
+
+/* 资讯：标题快捷复制 */
+.news-title-copy { cursor: pointer; opacity: 0.8; }
+.news-title-copy:hover { opacity: 1; color: var(--accent); }
+
+/* 概览待办卡的「还有更多」提示 */
+.todo-mini-more {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  padding: 4px 0 0;
+}
+
+/* 队列条目的 OA 状态标签与「PDF 直链」按钮 */
+.ablesci-tag {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--line, rgba(0,0,0,.12));
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.ablesci-tag.ok { color: #1f7a4d; border-color: #b9e2cc; background: #effaf3; }
+.ablesci-tag.no { color: #8a5a00; border-color: #f0dcae; background: #fdf6e6; }
+.ablesci-tag.warn { color: #9b2b2b; border-color: #f0c2c2; background: #fdf0f0; }
+.ablesci-pdf {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--line, rgba(0,0,0,.12));
+  color: var(--text);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.ablesci-pdf:hover { background: rgba(0,0,0,.04); }
+
+/* news search row (title -> Google Scholar) */
+.news-search-row { display: flex; align-items: center; gap: 8px; margin: 0 0 12px; }
+.news-search-wrap { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 8px; padding: 8px 12px; border: 1px solid var(--line, rgba(0,0,0,.12)); border-radius: 10px; background: rgba(255,255,255,.55); }
+.news-search-wrap svg { width: 16px; height: 16px; flex: 0 0 auto; opacity: .6; }
+.news-search { flex: 1 1 auto; min-width: 0; border: 0; outline: none; background: transparent; font-size: 13px; color: var(--text); }
+.news-search-btn { flex: 0 0 auto; padding: 8px 14px; border-radius: 10px; border: 1px solid var(--line, rgba(0,0,0,.12)); background: rgba(255,255,255,.7); font-size: 13px; cursor: pointer; white-space: nowrap; }
+.news-search-btn:hover { background: rgba(0,0,0,.05); }
+
+/* pdf dropzone: no overflow after library pdf shows up */
+.pdf-dropzone { overflow: hidden; }
+.pdf-drop-text, .pdf-drop-hint, .pdf-file-meta, .pdf-file-info span, .pdf-inbox-name, .pdf-inbox-meta { white-space: normal; overflow-wrap: anywhere; word-break: break-word; }
+.pdf-file-info { max-width: 100%; flex-wrap: wrap; row-gap: 4px; }
+.pdf-file-info span { min-width: 0; }
+.pdf-dropzone .pdf-drop-text { max-width: 100%; }
+
+/* katex display math must not break out */
+.reading-body .katex-display, .sum-detail-body .katex-display, #pdfPreview .katex-display, #pdfTransContent .katex-display { overflow-x: auto; overflow-y: hidden; padding: 2px 0; }
+/* glossary external search */
+.glossary-actions { display: flex; align-items: center; gap: 8px; margin: 0 0 12px; flex-wrap: wrap; }
+.glossary-ext-btn { padding: 6px 12px; border-radius: 9px; border: 1px solid var(--line, rgba(0,0,0,.12)); background: rgba(255,255,255,.7); font-size: 12.5px; cursor: pointer; white-space: nowrap; }
+.glossary-ext-btn:hover { background: rgba(0,0,0,.05); }
+.glossary-hint { font-size: 12px; color: var(--text-muted); }
+
+/* ablesci points chip */
+.ablesci-points { flex: 0 0 auto; font-size: 12px; padding: 3px 9px; border-radius: 8px; border: 1px solid var(--line, rgba(0,0,0,.12)); background: rgba(255,255,255,.55); color: var(--text-muted); white-space: nowrap; margin-left: auto; }
+.ablesci-points.low { color: #9b2b2b; border-color: #f0c2c2; background: #fdf0f0; }
+/* upload box: long file name / narrow card must never spill out of the dashed box */
+.pdf-file-info { max-width: 100%; flex-wrap: nowrap; min-width: 0; }
+.pdf-file-info #pdfFileName { max-width: none; flex: 1 1 auto; min-width: 0; white-space: normal; overflow-wrap: anywhere; word-break: break-word; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; text-overflow: clip; }
+.pdf-file-meta { flex: none; white-space: nowrap; }
+.pdf-file-info .pdf-file-clear, .pdf-file-info svg { flex: none; }
+.pdf-inbox-item { min-width: 0; }
+.pdf-inbox-title { white-space: normal; overflow-wrap: anywhere; word-break: break-word; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; text-overflow: clip; }
+.pdf-inbox-hint { white-space: normal; overflow-wrap: anywhere; }
+.pdf-dropzone { max-width: 100%; box-sizing: border-box; }
+/* let the dashed box grow instead of clipping its own text */
+.pdf-dropzone { overflow: visible; height: auto; }
+.pdf-upload-card > #pdfDropzone { min-height: 120px; align-self: start; }
+/* glossary: each term links out to Scholar / Semantic Scholar */
+.glossary-term-row { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.glossary-term-link { text-decoration: none; color: var(--text); }
+.glossary-term-link:hover { color: var(--accent); text-decoration: underline; }
+.glossary-ext-links { display: inline-flex; gap: 8px; font-size: 11.5px; }
+.glossary-ext-links a { color: var(--text-muted); text-decoration: none; border-bottom: 1px dashed var(--line, rgba(0,0,0,.2)); }
+.glossary-ext-links a:hover { color: var(--accent); }
+
+/* export format select looks like the other header buttons */
+.hs-select { padding: 5px 8px; font-size: 12.5px; cursor: pointer; }
+/* ===== 上传卡片栅格：列宽允许压缩，容器变窄就自动堆叠，绝不再顶出卡片 ===== */
+.pdf-upload-card { grid-template-columns: minmax(0, 0.92fr) minmax(0, 1.35fr); }
+.pdf-upload-card > * { min-width: 0; }
+.pdf-upload-card > #pdfDropzone { width: auto; max-width: 100%; }
+.pdf-engine-row, .pdf-action-row { min-width: 0; max-width: 100%; }
+.pdf-action-row { flex-wrap: wrap; row-gap: 8px; }
+.pdf-engine-name { white-space: normal; }
+.pdf-engine-limit { white-space: nowrap; }
+.pdf-engine-desc { white-space: normal; overflow-wrap: anywhere; }
+/* 两列布局需要约 700px 才有余量；低于 1280 直接上下堆叠，内容永远有整行宽度 */
+@media (max-width: 1279px) {
+  .pdf-upload-card { grid-template-columns: 1fr; }
+  .pdf-upload-card > #pdfDropzone { grid-column: 1; grid-row: auto; }
+  .pdf-upload-card > .pdf-engine-row,
+  .pdf-upload-card > .pdf-action-row { grid-column: 1; }
+}
+/* 摘要卡片：右上圆形勾选与「删除」按钮不再重叠（2026-11-07） */
+.sum-card-header { padding-right: 44px; }
+.sum-card-check { top: 15px; right: 12px; }@media (max-width: 640px) {
+  .sum-card-header { padding-right: 6px; flex-wrap: wrap; row-gap: 6px; }
+}
+
+/* ============================================================
+   2026-11-07 · 第二批：卡片绿点与标题同行 / 两块 PDF 卡片等宽等高
+   ============================================================ */
+
+/* 一、卡片标题：绿点不再绝对定位，改成标题行内的行内圆点，永远和文字同一基线 */
+.card-dot { display: none; }
+.card-label { position: relative; padding-left: 16px; }
+.card-label::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+/* 博士进度卡标题居中，不要左上角孤立的绿点 */
+.card-phd .card-label::before,
+.card-phd .card-label { padding-left: 0; }
+.card-phd .card-label::before { display: none; content: none; }
+
+/* 二、「上传 PDF」与「文献库 PDF」两张卡等宽、等高 */
+@media (min-width: 1181px) {
+  .pdf-upload-card {
+    grid-template-columns: minmax(180px, 0.85fr) minmax(280px, 1.35fr);
+  }
+}
+.pdf-col-left {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: stretch;
+  gap: 16px;
+}
+.pdf-col-left > .card {
+  flex: initial;
+  margin-bottom: 0;
+  min-width: 0;
+  height: 100%;
+}
+@media (max-width: 1180px) {
+  .pdf-col-left { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* 三、文献库列表：已转写标记 */
+.pdf-inbox-done {
+  flex: 0 0 auto;
+  font-size: 11px;
+  letter-spacing: .06em;
+  color: var(--accent);
+  /* 不要外面的椭圆描边，只留一个小勾 + 文字 */
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  white-space: nowrap;
+}
+.pdf-inbox-done::before { content: '✓'; margin-right: 3px; }
+.pdf-inbox-item.is-done .pdf-inbox-title { color: var(--text-secondary); }
+
+/* 四、热点日报列表项改成真链接：去掉下划线、继承文字色 */
+.hs-item.hs-item-link {
+  text-decoration: none;
+  color: inherit;
+}
+.hs-item.hs-item-link:visited { color: inherit; }
+
+/* 五、日报期次徽标统一：上午/下午都用同一套配色，只有文字不同 */
+.hs-session-am,
+.hs-session-pm {
+  background: var(--accent-dim);
+  color: var(--accent);
+  border-color: transparent;
+}
+
+/* ============================================================
+   2026-11-07 · 第三批：上传卡内容不再溢出 / 文献库列表拉高 /
+   进度卡与结果卡同宽 / 列表按钮
+   ============================================================ */
+
+/* 一、上传卡两列改成可收缩（minmax(0,…)）：原来按 fr + 固定最小值分，
+   引擎那一列的最小内容宽度比卡片还宽，直接把整块顶到卡片外面。
+   改成 0 下限后内容只会换行、不会溢出。 */
+.pdf-upload-card {
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+  column-gap: 22px;
+  overflow: hidden;
+}
+.pdf-upload-card > * { min-width: 0; }
+
+/* 二、文献库卡：卡片撑满高度，列表吃掉剩余空间（列表不再限死 220px） */
+.pdf-inbox-card {
+  display: flex;
+  flex-direction: column;
+}
+.pdf-inbox-list {
+  flex: 1 1 auto;
+  max-height: none;
+  min-height: 260px;
+}
+.pdf-inbox-item { flex-wrap: wrap; row-gap: 6px; }
+
+/* 三、进度卡横跨两列：跟下面的「转写结果」卡一样宽 */
+.pdf-col-left > #pdfProgressCard { grid-column: 1 / -1; }
+
+/* 四、文献库条目的「转写中」徽标 / 查看结果按钮 */
+.pdf-inbox-busy {
+  flex: 0 0 auto;
+  font-size: 11px;
+  letter-spacing: .06em;
+  color: var(--amber, #b8860b);
+  border: 1px dashed var(--amber, #b8860b);
+  border-radius: 999px;
+  padding: 1px 8px;
+  white-space: nowrap;
+}
+.pdf-inbox-open { border-color: var(--accent); color: var(--accent); }
+.pdf-inbox-open:hover { background: var(--accent-dim); }
+.pdf-inbox-redo { color: var(--text-muted); border-color: var(--line, rgba(0,0,0,0.12)); }
+.pdf-inbox-redo:hover { color: var(--accent); border-color: var(--accent); }
+
+/* ============================================================
+   2026-11-07 · 第四批
+   ============================================================ */
+
+/* 一、上传虚线框拉到和右边「引擎/按钮」那一列一样高（显式行号，行高由右列内容决定） */
+.pdf-upload-card { grid-template-rows: auto auto; }
+.pdf-upload-card > #pdfDropzone {
+  grid-column: 1;
+  grid-row: 1 / span 2;
+  align-self: stretch;
+  height: 100%;
+  min-height: 0;
+  margin-top: 10px;
+}
+.pdf-upload-card > .pdf-engine-row { grid-column: 2; grid-row: 1; margin-top: 10px; }
+.pdf-upload-card > .pdf-action-row { grid-column: 2; grid-row: 2; }
+/* 窄屏堆叠时高度交回内容，不再硬撑 */
+@media (max-width: 1279px) {
+  .pdf-upload-card { grid-template-rows: auto; }
+  .pdf-upload-card > #pdfDropzone {
+    grid-column: 1; grid-row: auto; height: auto; min-height: 120px; align-self: auto;
+  }
+  .pdf-upload-card > .pdf-engine-row,
+  .pdf-upload-card > .pdf-action-row { grid-column: 1; grid-row: auto; }
+}
+
+/* 二、译文库 / 文艺精读条目的「删除」按钮（跟摘要卡片的删除同一视觉） */
+.trans-del-btn {
+  flex: 0 0 auto;
+  margin-left: 6px;
+  font-size: 11px;
+  font-family: var(--font-sans);
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--line, rgba(0,0,0,0.12));
+  border-radius: 999px;
+  padding: 1px 8px;
+  cursor: pointer;
+  transition: color .15s ease, border-color .15s ease;
+}
+.trans-del-btn:hover { color: var(--danger, #c0392b); border-color: var(--danger, #c0392b); }
+
+/* 三、「看历史 / 只看今天」的折叠按钮 */
+.hs-more {
+  display: block;
+  width: 100%;
+  margin: 10px 0 2px;
+  padding: 8px 10px;
+  font-size: 12px;
+  font-family: var(--font-sans);
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px dashed var(--line, rgba(0,0,0,.18));
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.hs-more:hover { color: var(--accent); border-color: var(--accent); }
+
+/* ============================================================
+   2026-11-07 · 第五批：上传卡标题回顶部 / 两卡等高 / 结果卡拉长
+   ============================================================ */
+
+/* 一、上传卡：「上传 PDF」标题被拖拽区挤到卡片底部
+   根因：第四批让 #pdfDropzone 占 grid-row 1/span 2，而标签行也在第 1 行，
+   两者争同一行，标签被挤下去。现在显式分三行：标签 / 内容 / 操作行。 */
+.pdf-upload-card { grid-template-rows: auto auto auto; }
+.pdf-upload-card > .card-label {
+  grid-column: 1 / -1;
+  grid-row: 1;
+}
+.pdf-upload-card > #pdfDropzone { grid-column: 1; grid-row: 2 / span 2; }
+.pdf-upload-card > .pdf-engine-row { grid-column: 2; grid-row: 2; }
+.pdf-upload-card > .pdf-action-row { grid-column: 2; grid-row: 3; }
+
+@media (max-width: 1279px) {
+  .pdf-upload-card { grid-template-rows: auto; }
+  .pdf-upload-card > .card-label { grid-column: 1; grid-row: auto; }
+  .pdf-upload-card > #pdfDropzone,
+  .pdf-upload-card > .pdf-engine-row,
+  .pdf-upload-card > .pdf-action-row { grid-column: 1; grid-row: auto; }
+}
+
+/* 二、「上传 PDF」与「文献库 PDF」两张卡等高、标题行同一水平线 */
+.pdf-col-left { align-items: stretch; }
+.pdf-col-left > .card { height: auto; }
+
+/* 三、下面的「转写结果」卡跟着拉长，别再是一小条 */
+.pdf-col-right { display: flex; flex-direction: column; gap: 16px; }
+.pdf-col-right > .card { width: 100%; }
+.pdf-result-card, .pdf-empty-state { min-height: 460px; }
+.pdf-result-card #pdfPreview,
+.pdf-result-card .markdown-body { min-height: 360px; }
+
+/* ============================================================
+   2026-11-07 · 第六批：合并面板的分栏标题 / 标题可复制 / 链接可点
+   ============================================================ */
+
+/* 一、合并后的「今日热点 · 前沿」：两栏各带一个小标题与归档入口 */
+.hs-section-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin: 22px 0 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line, rgba(0,0,0,.08));
+}
+.hs-section-title {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: .02em;
+  color: var(--text);
+}
+.hs-section-note {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.hs-section-link {
+  margin-left: auto;
+  font-size: 12px;
+  font-family: var(--font-sans);
+  color: var(--accent);
+  background: transparent;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+.hs-section-link:hover { text-decoration: underline; }
+.hs-section-head:first-of-type { margin-top: 4px; }
+
+/* 二、列表项是超链接：标题悬停给个明确的可点信号 */
+.hs-item-title-link {
+  text-decoration: none;
+  color: inherit;
+  transition: color .15s ease;
+}
+.hs-item:hover .hs-item-title-link { color: var(--accent); text-decoration: underline; }
+.hs-item.hs-item-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* 三、摘要卡片标题：点一下复制 */
+.sum-card-title-copy { cursor: copy; transition: color .15s ease; }
+.sum-card-title-copy:hover { color: var(--accent); }
+
+/* ============================================================
+   2026-11-07 · 第七批：检索式库按六个方向分组 / arXiv 多平台来源标签
+   ============================================================ */
+.query-groups { display: flex; flex-direction: column; gap: 18px; }
+.query-group {
+  padding: 14px 16px 6px;
+  border: 1px solid var(--card-border, var(--line, rgba(0,0,0,.1)));
+  border-radius: var(--radius);
+  background: var(--surface-2, rgba(0,0,0,.02));
+}
+.query-group-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line, rgba(0,0,0,.08));
+}
+.query-group-name { font-size: 14px; font-weight: 600; color: var(--text); }
+.query-group-en { font-size: 11px; letter-spacing: .04em; color: var(--text-muted); }
+.query-group-count { margin-left: auto; font-size: 11px; color: var(--text-muted); }
+.query-kw-rows { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+.query-kw-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.query-kw-label {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--text-muted);
+  min-width: 62px;
+}
+.query-kw {
+  font-size: 11px;
+  font-family: var(--font-sans);
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--accent-dim);
+  color: var(--accent);
+  white-space: nowrap;
+}
+.query-kw-en { font-family: var(--font-mono); }
+
+/* arXiv / Crossref / Semantic Scholar 来源标签 */
+.arxiv-srcbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+}
+.arxiv-src { color: var(--accent); font-weight: 600; }
+.arxiv-src-time { font-size: 11px; }
+.arxiv-src-warn { font-size: 11px; color: var(--amber, #b8860b); }
+.arxiv-badge {
+  font-size: 10px;
+  letter-spacing: .04em;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--accent-dim);
+  color: var(--accent);
+  white-space: nowrap;
+}
+.arxiv-badge-crossref { background: rgba(52,101,164,.12); color: #3465a4; }
+.arxiv-badge-semanticscholar { background: rgba(146,84,170,.12); color: #9254aa; }
+.arxiv-journal { color: var(--text-secondary); }
+
+
+
+
+/* ============================================================
+   第八批：今日热点 · 前沿 —— 六类资讯合并成一条流
+   ============================================================ */
+.hs-filters {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  margin: 14px 0 6px;
+}
+.news-filter {
+  border: 1px solid var(--hairline);
+  background: var(--glass);
+  color: var(--text-secondary);
+  border-radius: 999px;
+  padding: 5px 12px;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: all .18s ease;
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.news-filter:hover { border-color: var(--accent); color: var(--accent); transform: translateY(-1px); }
+.news-filter.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+.news-filter.active .news-filter-num { color: rgba(255,255,255,.82); }
+.news-filter-num { font-variant-numeric: tabular-nums; color: var(--text-secondary); font-size: 11.5px; }
+.news-filter-sep { width: 1px; height: 16px; background: var(--hairline); margin: 0 4px; }
+
+.news-item { align-items: flex-start !important; }
+.news-item:hover .hs-item-title-link { color: var(--accent); }
+.news-item:hover .hs-item-arrow { color: var(--accent); }
+.news-cat {
+  flex: 0 0 auto;
+  font-size: 11.5px;
+  line-height: 1;
+  padding: 5px 8px;
+  border-radius: 6px;
+  margin-top: 2px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.news-cat-prof { background: rgba(15,118,110,.1); color: #0f766e; border-color: rgba(15,118,110,.25); }
+.news-cat-industry { background: rgba(37,99,235,.1); color: #1d4ed8; border-color: rgba(37,99,235,.22); }
+.news-cat-world { background: rgba(124,58,237,.1); color: #6d28d9; border-color: rgba(124,58,237,.22); }
+.news-cat-finance { background: rgba(217,119,6,.12); color: #b45309; border-color: rgba(217,119,6,.25); }
+.news-cat-global { background: rgba(220,38,38,.1); color: #b91c1c; border-color: rgba(220,38,38,.22); }
+.news-cat-blogger { background: rgba(16,185,129,.12); color: #047857; border-color: rgba(16,185,129,.25); }
+
+.news-title-en {
+  font-size: 12.5px;
+  color: var(--text-tertiary, var(--text-secondary));
+  margin-top: 3px;
+  line-height: 1.5;
+  opacity: .85;
+}
+.news-foot {
+  margin: 10px 0 4px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-align: right;
+}
+.hs-archive-row {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+  margin: 16px 0 4px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--hairline-soft);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.hs-archive-note { opacity: .8; }
+/* ============================================================
+   第九批：删除统一 ×、条目改名、分组改名、公式块微调
+   ============================================================ */
+.entry-del,
+.trans-del-btn,
+.sum-card-del {
+  flex: none;
+  width: 22px; height: 22px; min-width: 22px;
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-tertiary, #8a8a8a);
+  font-size: 14px; line-height: 1;
+  cursor: pointer;
+  transition: color .15s ease, background .15s ease, border-color .15s ease;
+}
+.entry-del:hover,
+.trans-del-btn:hover,
+.sum-card-del:hover {
+  color: #c2410c;
+  border-color: rgba(194, 65, 12, .28);
+  background: rgba(194, 65, 12, .08);
+}
+.entry-del:disabled,
+.trans-del-btn:disabled,
+.sum-card-del:disabled { opacity: .5; cursor: default; }
+
+.trans-ren-btn,
+.sum-card-ren,
+.grp-ren {
+  flex: none;
+  width: 22px; height: 22px; min-width: 22px;
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-tertiary, #8a8a8a);
+  font-size: 12.5px; line-height: 1;
+  cursor: pointer;
+  transition: color .15s ease, background .15s ease, border-color .15s ease;
+}
+.trans-ren-btn:hover,
+.sum-card-ren:hover,
+.grp-ren:hover {
+  color: var(--accent, #0F766E);
+  border-color: rgba(15, 118, 110, .3);
+  background: rgba(15, 118, 110, .08);
+}
+
+/* 公式块：行间公式给点呼吸空间，长公式可横向滚动 */
+.katex-display {
+  margin: 14px 0;
+  padding: 6px 2px;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+.katex { font-size: 1.02em; }
+/* 整块公式（…）单独排版，宽公式横向滚动不撑破卡片 */
+.math-display { display: block; overflow-x: auto; overflow-y: hidden; padding: 2px 0; margin: 6px 0; }
+.math-display .katex-display { margin: 0; }
+
+/* ===== 今日十条：报纸式总览 + 小红书式卡片流 ===== */
+.hs-digest {
+  border: 1px solid var(--hairline, rgba(0,0,0,.12));
+  border-radius: 12px;
+  padding: 16px 20px 12px;
+  margin: 4px 0 16px;
+  background: linear-gradient(180deg, rgba(255,255,255,.72), rgba(255,255,255,.5));
+}
+.hs-digest-mast {
+  display: flex; align-items: baseline; justify-content: space-between;
+  border-bottom: 2px solid var(--accent); padding-bottom: 6px; margin-bottom: 8px;
+}
+.hs-digest-name { font-family: var(--font-serif, "Songti SC", serif); font-size: 19px; font-weight: 700; letter-spacing: .08em; color: var(--text); }
+.hs-digest-date { font-size: 11.5px; color: var(--text-muted); }
+.hs-digest-note { font-size: 11.5px; color: var(--text-muted); line-height: 1.7; margin-bottom: 6px; }
+.hs-digest-row { display: flex; gap: 10px; padding: 7px 0; border-bottom: 1px dashed var(--hairline-soft, rgba(0,0,0,.08)); }
+.hs-digest-row:last-child { border-bottom: 0; }
+.hs-digest-idx { flex: 0 0 18px; font-size: 11px; font-weight: 700; color: var(--accent); padding-top: 2px; }
+.hs-digest-main { min-width: 0; }
+.hs-digest-title { font-size: 13.5px; font-weight: 700; color: var(--text); text-decoration: none; line-height: 1.5; }
+.hs-digest-title:hover { color: var(--accent); }
+.hs-digest-brief { font-size: 12px; color: var(--text-secondary); line-height: 1.65; margin-top: 2px; }
+.hs-digest-meta { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+.news-filter-tip { font-size: 11px; color: var(--text-muted); align-self: center; }
+.news-filter-pref { border-style: dashed !important; }
+/* ===== 长文阅读排版：译文 / 原文精读 / 转写正文统一（首行缩进两格 + 舒展行距） ===== */
+.sum-detail-body, .reading-body, #pdfTransContent {
+  font-size: 14.8px;
+  line-height: 1.95;
+  color: var(--text-secondary);
+  max-width: 96ch;
+  margin: 0 auto;
+}
+.sum-detail-body p, .reading-body p, #pdfTransContent p {
+  text-indent: 2em;
+  margin: 0 0 0.75em;
+}
+/* 段首是图片 / 公式 / 列表时不缩进，避免视觉错位 */
+.sum-detail-body p:has(img), .reading-body p:has(img), #pdfTransContent p:has(img),
+.sum-detail-body p:has(.katex-display), .reading-body p:has(.katex-display), #pdfTransContent p:has(.katex-display) {
+  text-indent: 0;
+}
+.sum-detail-body h1, .sum-detail-body h2, .sum-detail-body h3,
+.reading-body h1, .reading-body h2, .reading-body h3,
+#pdfTransContent h1, #pdfTransContent h2, #pdfTransContent h3 {
+  font-family: var(--font-serif);
+  letter-spacing: .01em;
+  margin: 1.6em 0 .7em;
+}
+.sum-detail-body ul, .sum-detail-body ol,
+.reading-body ul, .reading-body ol,
+#pdfTransContent ul, #pdfTransContent ol { margin: .4em 0 1em 1.6em; }
+/* 译文库详情：标题与元信息更清爽 */
+#transDetailTitle { font-family: var(--font-serif); letter-spacing: .01em; }
+/* 今日十条：双语标题 + 简介 + 投票 */
+.hs-digest-row { align-items: flex-start; }
+.hs-digest-main { flex: 1 1 auto; }
+.hs-digest-title { display: inline-block; }
+.hs-digest-title-en {
+  display: block; font-size: 11.5px; color: var(--text-muted);
+  text-decoration: none; line-height: 1.55; margin-top: 1px;
+  font-family: var(--font-mono);
+}
+.hs-digest-title-en:hover { color: var(--accent); }
+.hs-digest-link { color: var(--accent); text-decoration: none; }
+.hs-digest-link:hover { text-decoration: underline; }
+.hs-digest-votes { flex: 0 0 auto; display: flex; gap: 2px; padding-top: 2px; }
+.hs-vote {
+  border: 1px solid transparent; background: transparent; cursor: pointer;
+  font-size: 14px; line-height: 1; padding: 3px 5px; border-radius: 8px;
+  opacity: .45; transition: opacity .15s ease, background .15s ease;
+}
+.hs-vote:hover { opacity: 1; background: var(--surface-2, rgba(0,0,0,.04)); }
+.hs-vote.on { opacity: 1; background: var(--accent-dim); border-color: var(--accent); }
+/* 资讯面板搜索行：去掉外层椭圆灰色条，只留一条细底线（功能不变） */
+.news-search-row { margin: 0 0 10px; }
+.news-search-wrap {
+  padding: 4px 0 6px;
+  border: 0;
+  border-bottom: 1px solid var(--hairline, var(--card-border));
+  border-radius: 0;
+  background: transparent;
+}
+.news-search { background: transparent; }
+.news-search-btn {
+  border: 0; background: transparent; padding: 4px 6px;
+  color: var(--text-muted); font-size: 12.5px;
+}
+.news-search-btn:hover { color: var(--accent); background: transparent; }
+/* 概览「最近论文」：行前圆圈直接勾选（与摘要卡片库同步，点了不跳转） */
+.today-paper { display: flex; align-items: center; gap: 10px; cursor: pointer; }
+.today-paper-check {
+  flex: 0 0 auto; width: 16px; height: 16px; padding: 0;
+  border: 1.5px solid var(--edge-outer, var(--card-border)); border-radius: 50%;
+  background: transparent; cursor: pointer; transition: background .15s ease, border-color .15s ease;
+}
+.today-paper-check:hover { border-color: var(--accent); opacity: 1; }
+.today-paper-check.on {
+  background: var(--accent); border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-dim);
+}
+.today-paper.selected .today-paper-title { color: var(--accent); }
+/* 摘要卡圆圈平时淡显，不再只在「勾选模式」里才出现 */
+.sum-card-check { opacity: .35; }
+.sum-card:hover .sum-card-check { opacity: .75; }.today-paper-title { flex: 1 1 auto; min-width: 0; }
+.today-paper-date { flex: 0 0 auto; margin-left: 8px; }.today-paper { flex-wrap: nowrap !important; }
+.today-paper-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }/* 资讯搜索：把输入框自己的灰底圆角条也去掉（只留外层一条细底线） */
+#newsScholarQuery, .news-search {
+  background: transparent !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  padding-left: 0 !important;
+}/* 概览「今日待办」：行前圆圈直接勾选完成（与「待办」面板同一份数据，勾了就不跳转） */
+.today-todo { display: flex; align-items: center; gap: 10px; }
+.today-todo-check {
+  flex: 0 0 auto; width: 15px; height: 15px; padding: 0;
+  border: 1.5px solid var(--edge-outer, var(--card-border)); border-radius: 50%;
+  background: transparent; cursor: pointer; transition: background .15s ease, border-color .15s ease;
+}
+.today-todo-check:hover { border-color: var(--accent); background: var(--accent-dim); }
+.today-todo-text { flex: 1 1 auto; min-width: 0; }
+/* 今日待办/最近论文行：单行，长文本省略 */
+.today-todo .today-todo-text, .today-paper-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* 公式源文本损坏时的兜底：不再显示红色 KaTeX 报错，改成中性的源码块 */
+.katex-error {
+  color: var(--text-muted) !important;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px; line-height: 1.6;
+  background: var(--surface-soft, rgba(0,0,0,.03));
+  border-radius: 6px; padding: 6px 8px;
+  display: inline-block; white-space: pre-wrap; word-break: break-all;
+}
+.math-raw-block {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px; line-height: 1.6; color: var(--text-muted);
+  background: var(--surface-soft, rgba(0,0,0,.03));
+  border-left: 2px solid var(--hairline, var(--card-border));
+  border-radius: 0 6px 6px 0;
+  padding: 8px 10px; margin: 10px 0; white-space: pre-wrap; word-break: break-word;
+}
+/* 长文正文吃满容器宽度，一行多放几个字（左右内边距收窄） */
+.sum-detail-body, .reading-body, #pdfTransContent { max-width: 100% !important; }/* 译文 / 精读正文：左右留白收窄到 6px，正文吃满容器，一行多放 1–2 个字 */
+.sum-detail-body { padding: 18px 6px; max-width: 100%; }
+.reading-body { padding-left: 6px; padding-right: 6px; }/* 上传卡：整块内容往上提，左侧虚线框不再拉满两行高度（短一点、别把整卡撑长） */
+.pdf-upload-card { padding-top: 10px; }
+.pdf-upload-card > .card-label { margin-bottom: 6px; }
+.pdf-upload-card > #pdfDropzone {
+  grid-row: 2 / span 2;
+  align-self: start;
+  height: auto;
+  max-height: none;
+  min-height: 0;
+  padding: 24px 12px;
+  justify-content: center;
+}
+.pdf-upload-card > .pdf-engine-row { margin-top: 0; }
+@media (max-width: 1279px) {
+  .pdf-upload-card > #pdfDropzone { min-height: 150px; padding: 24px 12px; }
+}/* 来源标签（如「阮一峰 · 科技爱好者周刊」）太长时不再顶出卡片：限宽 + 省略号 */
+.hs-session { max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 上传卡被右侧文献库卡拉高后，网格行会被均分撑开 → 参数/按钮行离引擎选项一大截。改为顶部对齐、空隙留到底部 */
+.pdf-upload-card { align-content: start; }
+
+/* ============================================================
+   2026-11-08 · 上传卡第二轮：两卡各按自身内容定高 / 虚线框与右列等高 /
+   文献库列表超长滚动 / 参数分散 / 开始转写贴右
+   ============================================================ */
+
+/* 一、两张卡不再强制等高（等高会把左卡硬拉长，右边一长左边就空一大截） */
+.pdf-col-left { align-items: start; }
+.pdf-col-left > .card { height: auto; }
+
+/* 二、左侧虚线框拉长到与右侧「引擎 + 参数 + 按钮」那一列内容同高 */
+.pdf-upload-card > #pdfDropzone {
+  grid-row: 2 / span 2;
+  align-self: stretch;
+  height: 100%;
+  max-height: none;
+  min-height: 200px;
+  padding: 20px 12px;
+  justify-content: center;
+}
+
+/* 三、文献库卡高度收到内容大小：列表超出就滚动，不再把整卡和左边的卡拉长 */
+.pdf-inbox-card { height: auto; }
+.pdf-inbox-list {
+  max-height: 250px;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+.pdf-inbox-list::-webkit-scrollbar { width: 6px; }
+.pdf-inbox-list::-webkit-scrollbar-thumb { background: var(--hairline, rgba(0,0,0,.16)); border-radius: 3px; }
+
+@media (max-width: 1279px) {
+  .pdf-upload-card > #pdfDropzone { grid-row: 2; height: auto; min-height: 150px; }
+  .pdf-inbox-list { max-height: 260px; }
+}
+
+
+/* 参数两个勾选项之间拉开距离，别挤在一起 */
+.pdf-opts { gap: 40px; }
+/* 参数/状态与「开始转写」整体贴右 */
+.pdf-action-row { justify-content: flex-end; }
+.pdf-action-right { margin-left: auto; }
+
+/* 参数行重排：两个勾选框拉开间距，OCR 说明与「开始转写」同排且按钮贴右 */
+.pdf-action-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; width: 100%; justify-content: flex-end; }
+.pdf-opts { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 44px; }
+.pdf-opt { flex: 0 0 auto !important; }
+.pdf-opt-ocr { margin-right: auto; }
+.pdf-action-right { margin-left: auto; }
+/* 窄屏：卡片不再分两栏，虚线框 / 引擎 / 参数各自整行，避免右列被压成 145px */
+@media (max-width: 1279px) {
+  .pdf-upload-card { grid-template-columns: 1fr !important; grid-template-rows: auto !important; }
+  .pdf-upload-card > .card-label,
+  .pdf-upload-card > #pdfDropzone,
+  .pdf-upload-card > .pdf-engine-row,
+  .pdf-upload-card > .pdf-action-row { grid-column: 1 !important; grid-row: auto !important; }
+  .pdf-upload-card > #pdfDropzone { height: auto; min-height: 150px; }
+}
+/* 求助队列行在窄窗口会顶出卡片：元信息改为可收缩 + 省略号，永不撑破行宽 */
+.ablesci-item { min-width: 0; }
+.ablesci-name { flex: 1 1 40%; min-width: 0; }
+.ablesci-meta { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ablesci-tag, .ablesci-pdf, .ablesci-cancel, .ablesci-dot { flex: none; }
+/* 正文里的 HTML 表格（PDF 源文自带 <table>）：成真表格、超宽可横向滚动 */
+.md-html-table { margin: 12px 0; overflow-x: auto; }
+.md-html-table table { border-collapse: collapse; width: 100%; font-size: 13px; }
+.md-html-table td, .md-html-table th {
+  border: 1px solid var(--hairline, rgba(0,0,0,.12));
+  padding: 6px 8px; text-align: left; vertical-align: top; white-space: normal;
+}
+.md-html-table tr:nth-child(even) td { background: var(--surface-soft, rgba(0,0,0,.02)); }
+/* ===== 待办「新建待办」行：页面缩放/窄窗口不再把按钮顶出卡片 ===== */
+.todo-select {
+  flex: 0 1 100px;
+  min-width: 0;
+  text-overflow: ellipsis;
+}
+#todoAddBtn { flex: 0 0 auto; }
+@media (max-width: 560px) {
+  .todo-input-row > .todo-input { flex: 1 1 100%; }
+  .todo-select { flex: 1 1 auto; }
+}
+/* ===== PDF 结果卡页签行：缩放/窄窗口时换行，不再被卡片裁掉 ===== */
+.pdf-tabs { flex-wrap: wrap; row-gap: 4px; max-width: 100%; }
+.pdf-tab { flex: 0 0 auto; white-space: nowrap; }
+
+/* ===== PDF 操作行右侧（状态 + 开始转写）：极窄时换行，不撑破卡片 ===== */
+.pdf-action-right { flex-wrap: wrap; min-width: 0; }
+.pdf-worker-status { min-width: 0; }
+
+/* ===== 资讯条目元信息行：极窄/高倍缩放时可换行，DOI 省略不撑破卡片 ===== */
+.news-meta, .news-actions { flex-wrap: wrap; min-width: 0; }
+.news-doi { max-width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.news-quick-add-btn, .ablesci-quick-btn { flex: 0 0 auto; }
+/* ===== 阅读页右侧滚动轴 + 滚动后浮出的返回键 ===== */
+#readScrollRail {
+  position: fixed; top: 0; right: 0; bottom: 0; width: 16px;
+  z-index: 70; display: none;   /* 显隐用 display：opacity 过渡在节流的标签页里不会走完，会一直看不见 */
+  background: linear-gradient(to left, rgba(0,0,0,.05), rgba(0,0,0,0));
+}
+#readScrollRail.on { display: block; }
+#readScrollThumb {
+  position: absolute; right: 3px; top: 0; width: 9px;
+  background: var(--accent);
+  border-radius: 6px;
+  box-shadow: 0 1px 6px rgba(0,0,0,.16);
+  cursor: grab;
+  transition: background .15s ease, width .15s ease;
+}
+#readScrollThumb.grabbing { cursor: grabbing; width: 11px; }
+#readScrollThumb:hover { background: var(--accent-strong, var(--accent)); }
+
+#readBackFab {
+  position: fixed; left: 274px; top: 18px; z-index: 71;   /* 左上角；left 由脚本按侧栏实际宽度实时改写 */
+  display: none;
+  align-items: center; gap: 6px;
+  padding: 9px 16px;
+  border-radius: 999px;
+  border: 1px solid var(--card-border);
+  background: var(--card-bg, #fff);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 13.5px; font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 6px 22px rgba(0,0,0,.14);
+}
+#readBackFab.on { display: inline-flex; }
+#readBackFab:hover { background: var(--accent); color: var(--btn-text); border-color: var(--accent); }
+@media (max-width: 560px) {
+  #readScrollRail { width: 20px; }
+  #readScrollThumb { width: 10px; right: 4px; }
+  #readBackFab { left: 86px; top: 12px; padding: 8px 13px; font-size: 12.5px; }
+}
+/* 页面本身在滚（body），把原生滚动条收掉，统一用上面这条自绘滚动轴 */
+body { scrollbar-width: none; }
+body::-webkit-scrollbar { width: 0; height: 0; }

@@ -17,7 +17,9 @@
     journal: [],
     journalTypeFilter: '全部',
     activeNewsTab: 'all',
-    relevanceOnly: false,   // 只看与研究领域相关的资讯
+    relevanceOnly: true,   // 只看与研究领域相关的资讯（默认开，压掉跑题内容）
+    // 科研通「求助全文」队列：{pending:[...], done:[...], at}
+    ablesci: { pending: [], done: [], at: null },
     theme: 'light',
     // 文献工具
     lit: { journals: null, glossary: null, queries: null, arxiv: null },
@@ -26,8 +28,14 @@
     glossaryQuery: '',
     // 前沿瞭望
     frontier: null,
+    hsShowAll: false,        // 热点日报：是否展开历史
+    hsShowAllFr: false,      // 前沿瞭望：是否展开历史
     // 热点日报
     hotspots: null,
+    // 热点·前沿统一资讯流（六类合并）
+    news: null,
+    hotCat: 'all',
+    hotDays: 1,   // 以上一个 9 点为界、此前 24 小时（不够 10 条时才自动放宽到两天）
     // 科技爱好者周刊（独立轻接口）
     weekly: null,
     // PDF 转写
@@ -71,6 +79,7 @@
     '06_项目归档': '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>',
     '07_个人管理': '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>',
     '08_临时中转': '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg>',
+    '09_毕业设计': '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 10L12 5 2 10l10 5 10-5z"/><path d="M6 12.5v4.2c0 1.3 2.7 2.3 6 2.3s6-1 6-2.3v-4.2"/><path d="M20 11v5"/></svg>',
   };
 
   // 空态图标（内联线性 SVG；界面禁 emoji）
@@ -98,9 +107,104 @@
     return div.innerHTML;
   }
 
+  // 源文（MinerU/翻译链）里常带 HTML 表格片段。整块当普通文本走会把 <tr><td> 原样显示出来，
+  // 所以只保留表格结构标签、其余标签去掉，再作为真表格插进正文。
+  function sanitizeHtmlTable(raw) {
+    var s = String(raw || '');
+    s = s.replace(/<\/?(?!table\b|thead\b|tbody\b|tr\b|td\b|th\b|caption\b|br\b)[a-zA-Z][^>]*>/gi, '');
+    s = s.replace(/<(table|thead|tbody|tr|td|th|caption)\b[^>]*>/gi, '<$1>');
+    s = s.replace(/<br\b[^>]*>/gi, '<br>');
+    s = s.trim();
+    if (!/^<table>/i.test(s)) s = '<table>' + s + '</table>';
+    return '<div class="md-html-table">' + s + '</div>';
+  }
+
+  // KaTeX 支持面比 TeX 窄：这些原语出现在公式里会让**整条公式**飘红，只能去掉（不影响读法）。
+  // 新增一个就在这个数组里加一项，前端 lib 与 tools/scan_render_risks.py 的清单保持一致。
+  var TEX_UNSUPPORTED = ['\\displaylimits', '\\allowbreak', '\\mathstrut', '\\eqref', '\\nonumber'];
+  function stripUnsupportedTex(s) {
+    var out = String(s || '');
+    for (var i = 0; i < TEX_UNSUPPORTED.length; i++) {
+      var cmd = TEX_UNSUPPORTED[i];
+      out = out.split(cmd).join('');
+    }
+    return out;
+  }
+
+  // 已知的源文本损坏：PDF/翻译链里出现过 `\end{\right]array}` 这种把 \right] 塞进环境名的写法。
+  // 真正结构错乱的公式没法凭空还原，但先把这类能认出来的改回来，能救一个是一个。
+  function repairLatex(s) {
+    return stripUnsupportedTex(String(s || ''))
+      .replace(/\\end\{\\right([)\]}])array\}/g, '\\right$1')
+      .replace(/\\end\{\\right([)\]}])?aligned\}/g, '\\right$1\\end{aligned}')
+      // 「\end{array} } \right]」这种把组提前闭合、右定界符留在外面的写法，KaTeX 会报
+      // Expected '\right', got '}'；只认这一种形状，避免误伤 {\frac{a}{b}} \right] 这类正常写法
+      .replace(/\\end\{(array|aligned)\}\s*\}\s*\\(right)([)\]])/g, '\\end{$1} \\$2$3 }');
+  }
+
+  // 源文里的 HTML 片段（MinerU 常见）：表格单独成块渲染，其余标签只保留文本，
+  // 否则逐行解析会把 <div>/<span>/<br> 当正文原样打出来。
+  function normalizeSourceHtml(md) {
+    return String(md || '')
+      .replace(/<br\s*\/?>/gi, '\n')
+      .replace(/<img[^>]*?src=["']([^"']+)["'][^>]*>/gi, function (m, src) { return '\n![](' + src + ')\n'; })
+      .replace(/<math[^>]*>([\s\S]*?)<\/math>/gi, function (m, inner) {
+        var t = inner.replace(/<[^>]+>/g, '').trim();
+        return t ? '\n' + t + '\n' : '';
+      })
+      .replace(/<\/?(?:p|div|section|article|figure|figcaption|span|font|center|blockquote|a|strong|em|i|b|u|sub|sup|small|o:p|html|body|head|meta|link|thead|tbody|tr|td|th|caption|table)\b[^>]*>/gi, '')
+      .replace(/&nbsp;/gi, ' ')
+      .replace(/&amp;/gi, '&')
+      .replace(/&lt;/gi, '<')
+      .replace(/&gt;/gi, '>');
+  }
+
+  // KaTeX 排版失败时的兜底：不再飘红报错。整段正文被误当公式的还原成段落；真公式按源码块显示。
+  function rescueMathErrors(root) {
+    if (!root || !root.querySelectorAll) return;
+    var errs = root.querySelectorAll('.katex-error');
+    Array.prototype.forEach.call(errs, function (err) {
+      if (err.dataset.rescued) return;
+      err.dataset.rescued = '1';
+      var raw = String(err.textContent || '').replace(/^\s*KaTeX parse error[\s\S]*?at position \d+:\s*/, '').trim();
+      var box = err.closest ? err.closest('.math-display') : null;
+      // 一整段中文正文被当成公式：还原成普通段落，行内 $…$ 再交给 KaTeX 排
+      if (box && /[\u4e00-\u9fa5]/.test(raw)) {
+        var txt = raw.replace(/^\s*\$\$/, '').replace(/\$\$\s*$/, '').trim();
+        var div = document.createElement('div');
+        div.className = 'math-fallback-text';
+        div.textContent = txt;
+        box.parentNode.replaceChild(div, box);
+        applyMath(div);
+        return;
+      }
+      err.textContent = repairLatex(raw) || raw;
+      err.classList.add('math-raw-block');
+    });
+  }
+
   // 轻量 Markdown 渲染器（零依赖，支持日报常用语法）
   function renderMarkdown(md) {
     if (!md) return '';
+    // 跨行的 $$…$$ / \[…\] 公式块要先整块摘出来。
+    // 逐行解析会把开头的 $$ 单独成段、正文另起一段，KaTeX 就再也配不上对，公式只能显示成 $ 原文。
+    var blockMath = [];
+    md = String(md).replace(/\$\$([\s\S]*?)\$\$|\\\[([\s\S]*?)\\\]/g, function (m) {
+      var idx = blockMath.length;
+      blockMath.push(m);
+      return '\u0000DISPMATH' + idx + '\u0000';
+    });
+    // 同理：HTML 表格先整块摘走，逐行解析会把标签当正文显示
+    var htmlTables = [];
+    md = String(md).replace(/<table[\s\S]*?<\/table>/gi, function (m) {
+      var idx2 = htmlTables.length;
+      htmlTables.push(m);
+      return '\u0000HTMLTABLE' + idx2 + '\u0000';
+    });
+    // 抽完表格，剩下零散的 HTML 标签统一清一遍（这一步是「入」的单一关口）；代码块内保持原样
+    md = md.split(/(```[\s\S]*?```)/).map(function (seg, si) {
+      return (si % 2 === 1) ? seg : normalizeSourceHtml(seg);
+    }).join('');
     var lines = md.split('\n');
     var html = [];
     var inCodeBlock = false;
@@ -146,6 +250,22 @@
       // 空行
       if (trimmed === '') {
         closeList(); closeQuote();
+        continue;
+      }
+
+      // 整块公式：单独一个段落铺出去，由 KaTeX 按 $$…$$ 显示排版
+      var dm = trimmed.match(/^\u0000DISPMATH(\d+)\u0000$/);
+      if (dm) {
+        closeList(); closeQuote();
+        html.push('<div class="math-display">' + escapeHtml(repairLatex(blockMath[+dm[1]] || '')) + '</div>');
+        continue;
+      }
+
+      // HTML 表格（源文自带的 <table>）：整块渲染成真表格
+      var ht = trimmed.match(/^\u0000HTMLTABLE(\d+)\u0000$/);
+      if (ht) {
+        closeList(); closeQuote();
+        html.push(sanitizeHtmlTable(htmlTables[+ht[1]]));
         continue;
       }
 
@@ -209,7 +329,30 @@
 
     closeList(); closeQuote();
     if (inCodeBlock) html.push('</code></pre>');
-    return html.join('\n');
+    var joined = html.join('\n');
+    // 模型偶尔少写一个结束符：配对成功的块已经抽走，剩下的孤立 $$ / \[ \] 只会显示成原文，直接清掉。
+    // 注意要先把成型的 .math-display 块（里面本来就得留 $$ 给 KaTeX 认）保护起来再清。
+    var keepMath = [];
+    joined = joined.replace(/<div class="math-display">[\s\S]*?<\/div>/g, function (m) {
+      keepMath.push(m);
+      return '\u0001KEEP' + (keepMath.length - 1) + '\u0001';
+    });
+    joined = joined.replace(/\$\$/g, '').replace(/\\\[|\\\]/g, '');
+    joined = joined.replace(/\u0001KEEP(\d+)\u0001/g, function (m, idx) {
+      return keepMath[+idx] || '';
+    });
+    // 表格占位符（可能被夹在段落里）：先整段替换，剩下的再逐处替换
+    joined = joined.replace(/<p>\u0000HTMLTABLE(\d+)\u0000<\/p>/g, function (m, idx) {
+      return sanitizeHtmlTable(htmlTables[+idx]);
+    });
+    joined = joined.replace(/\u0000HTMLTABLE(\d+)\u0000/g, function (m, idx) {
+      return sanitizeHtmlTable(htmlTables[+idx]);
+    });
+    // 兜底：公式块占位符若被夹在段落中间，也要还原成可排版的形式
+    joined = joined.replace(/\u0000DISPMATH(\d+)\u0000/g, function (m, idx) {
+      return '<span class="math-display">' + escapeHtml(repairLatex(blockMath[+idx] || '')) + '</span>';
+    });
+    return joined;
   }
 
   // 行内 Markdown：加粗、斜体、行内代码、链接、HTML上标下标
@@ -228,6 +371,14 @@
       return '\x00TAG' + idx + '\x00';
     });
 
+    // 保护数学公式：先整体摘出来，避免 * _ 被当成 markdown 斜体/加粗，最后原样交回给 KaTeX
+    var maths = [];
+    protoText = protoText.replace(/\\\[[\s\S]+?\\\]|\\\([\s\S]+?\\\)|\$\$[\s\S]+?\$\$|\$[^$\n]+?\$/g, function (m) {
+      var idx = maths.length;
+      maths.push(m);
+      return '\x00MATH' + idx + '\x00';
+    });
+
     var escaped = escapeHtml(protoText);
     // 行内代码
     escaped = escaped.replace(/`([^`]+)`/g, '<code>$1</code>');
@@ -244,7 +395,83 @@
     for (var i = 0; i < protectedTags.length; i++) {
       escaped = escaped.replace('\x00TAG' + i + '\x00', protectedTags[i]);
     }
+    // 还原公式（仍是 LaTeX 原文，随后由 applyMath 交给 KaTeX 排版）
+    for (var j = 0; j < maths.length; j++) {
+      escaped = escaped.replace('\x00MATH' + j + '\x00', escapeHtml(repairLatex(maths[j])));
+    }
     return escaped;
+  }
+
+  // 把容器里残留的 LaTeX 交给 KaTeX 排版：中英文精读、译文、摘要都用这一套
+  // 脚本是 defer 加载的，可能比首次渲染晚到；没到就排队，load 后补排一次
+  function sweepUnsupportedTex(root) {
+    if (!root || !root.childNodes) return;
+    var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+    var nodes = [];
+    while (walker.nextNode()) nodes.push(walker.currentNode);
+    nodes.forEach(function (n) {
+      var v = n.nodeValue;
+      if (!v || v.indexOf('\\') < 0) return;
+      var next = stripUnsupportedTex(v);
+      if (next !== v) n.nodeValue = next;
+    });
+  }
+
+  // 页头的 KaTeX 是 defer 加载的，但浏览器恢复旧会话、代理缓存返回空体等情况下会「标签在、
+  // 全局却不存在」，结果所有公式退化成源码。这里兜一层：缺了就自己重新注入并冲洗排队容器。
+  function ensureKatex() {
+    if (window.renderMathInElement) { flushMathQueue(); return true; }
+    if (ensureKatex._loading) return false;
+    ensureKatex._loading = true;
+    function load(src, next) {
+      var s = document.createElement('script');
+      s.src = src;
+      s.onload = next;
+      s.onerror = next;
+      document.head.appendChild(s);
+    }
+    load('/static/vendor/katex/katex.min.js', function () {
+      if (!window.katex) { ensureKatex._loading = false; return; }
+      load('/static/vendor/katex/auto-render.min.js', function () {
+        ensureKatex._loading = false;
+        flushMathQueue();
+      });
+    });
+    return false;
+  }
+
+  function flushMathQueue() {
+    var list = applyMath._q || [];
+    applyMath._q = [];
+    list.forEach(function (x) {
+      if (x && x.isConnected !== false) applyMath(x);
+    });
+  }
+
+  function applyMath(el) {
+    if (!el) return;
+    if (!window.renderMathInElement) {
+      var q = applyMath._q || (applyMath._q = []);
+      if (q.indexOf(el) < 0) q.push(el);
+      ensureKatex();
+      return;
+    }
+    // 渲染前把 KaTeX 不认的 TeX 原语从文本里抠掉：不只是本例的 \displaylimits，
+    // 任何走 applyMath 的地方（含非 renderMarkdown 注入的内容）都过这一道。
+    sweepUnsupportedTex(el);
+    try {
+      window.renderMathInElement(el, {
+        delimiters: [
+          { left: '$$', right: '$$', display: true },
+          { left: '\\[', right: '\\]', display: true },
+          { left: '\\(', right: '\\)', display: false },
+          { left: '$', right: '$', display: false }
+        ],
+        throwOnError: false,
+        ignoredTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code', 'img']
+      });
+      rescueMathErrors(el);
+    } catch (e) { /* 没网/没加载到 KaTeX 时保持原文，不影响阅读 */ }
   }
 
   function toast(msg) {
@@ -324,6 +551,8 @@
 
   // ===== 导航切换 =====
   function switchPanel(panel) {
+    // 前沿瞭望已并入「今日热点 · 前沿」：旧路由 #frontier 统一落到 hotspots
+    if (panel === 'frontier') panel = 'hotspots';
     var prev = state.panel;
     if (prev && prev !== panel) scrollMemory[prev] = window.scrollY || 0;
     state.panel = panel;
@@ -337,13 +566,14 @@
     staggerCards(panel);
     // 面板切换时懒加载数据
     if (panel === 'literature') loadLiteratureAll();
-    if (panel === 'frontier') loadFrontier();
-    if (panel === 'hotspots') loadHotspots();
+    if (panel === 'hotspots') loadHotFeed();
     if (panel === 'weekly') loadWeekly();
     if (panel === 'pdf') checkPdfHealth();
     if (panel === 'translations') loadTranslations();
     if (panel === 'readings') loadReadings();
     if (panel === 'focus') focusRenderAll();   // 专注面板：进度/统计/记录实时刷新
+    // 待办在概览卡、今日看板、待办面板三处出现，进任何一个都重拉一次，避免显示旧值
+    if (panel === 'todos' || panel === 'dashboard') loadTodos();
     refreshUnreadBadges();   // 进入即视为已读，红点立刻消
     positionNavInk(true);
     syncHash(panel);
@@ -382,6 +612,7 @@
     return api('/api/news').then(function (data) {
       state.news = data;
       renderNews();
+      if (data && data.data && data.data.weather) state.weather = data.data.weather;
       renderWeather();
       if (state.overview) {
         var newsCount = 0;
@@ -394,6 +625,12 @@
         if (el) countUp(el, newsCount, 1000);
       }
     });
+  }
+
+  function loadWeather() {
+    return api('/api/weather').then(function (d) {
+      if (d && d.ok && d.weather) { state.weather = d.weather; renderWeather(); }
+    }).catch(function () {});
   }
 
   function loadTodos() {
@@ -478,31 +715,35 @@
       if (miniRange2) miniRange2.textContent = '未设置学制';
     }
     renderGraduation();
-
-    var tree = state.overview.tree;
-    var fileCount = 0, dirCount = 0;
-    (function count(node) {
-      if (node.type === 'file') fileCount++;
-      else {
-        dirCount++;
-        (node.children || []).forEach(count);
-      }
-    })(tree);
-    countUp($('#statFiles'), fileCount, 1000);
-    countUp($('#statDirs'), dirCount, 1000);
-
-    var newsCount = 0;
-    if (state.news && state.news.data && state.news.data.news) {
+    /* 概览的三张统计卡（文件/目录/资讯条目）已按用户要求撤掉，这里只做存在性判断，
+       留着逻辑是为了以后要恢复时能直接生效。 */
+    var elFiles = $('#statFiles'), elDirs = $('#statDirs'), elNews = $('#statNews');
+    if (elFiles || elDirs) {
+      var tree = state.overview.tree;
+      var fileCount = 0, dirCount = 0;
+      (function count(node) {
+        if (node.type === 'file') fileCount++;
+        else {
+          dirCount++;
+          (node.children || []).forEach(count);
+        }
+      })(tree);
+      if (elFiles) countUp(elFiles, fileCount, 1000);
+      if (elDirs) countUp(elDirs, dirCount, 1000);
+    }
+    if (elNews && state.news && state.news.data && state.news.data.news) {
+      var newsCount = 0;
       Object.values(state.news.data.news).forEach(function (src) {
         newsCount += (src.items || []).length;
       });
+      countUp(elNews, newsCount, 1000);
     }
-    countUp($('#statNews'), newsCount, 1000);
   }
 
   function renderDashboardTodos() {
     var container = $('#dashboardTodos');
-    var pending = state.todos.filter(function (t) { return !t.done; }).slice(0, 4);
+    var pendingAll = state.todos.filter(function (t) { return !t.done; });
+    var pending = pendingAll.slice(0, 4);
     if (pending.length === 0) {
       container.innerHTML = '<div style="color:var(--text-muted);font-size:13px;padding:8px 0;">暂无待办，享受当下。</div>';
       return;
@@ -511,7 +752,9 @@
       return '<div class="todo-mini-item' + (t.done ? ' done' : '') + '">' +
         '<div class="todo-mini-check"></div>' +
         '<span class="todo-mini-text">' + escapeHtml(t.text) + '</span></div>';
-    }).join('');
+    }).join('') + (pendingAll.length > pending.length
+      ? '<div class="todo-mini-more">共 ' + pendingAll.length + ' 项未完成，去「待办事项」看全部</div>'
+      : '');
   }
 
   function renderDashboardJournal() {
@@ -549,8 +792,10 @@
   };
 
   function renderWeather() {
-    var w = state.news && state.news.data ? state.news.data.weather : null;
+    // 天气走独立轻接口（/api/weather），不再等整包资讯抓完：启动即显示
+    var w = state.weather || (state.news && state.news.data ? state.news.data.weather : null);
     var el = $('#weatherText');
+    if (!el) return;
     if (!w) { el.textContent = '天气暂不可用'; return; }
     var cur = w.current || {};
     var temp = cur.temp;
@@ -882,18 +1127,24 @@
     }).join('');
 
     var items = [];
+    var seenTitles = {};
+    function pushItem(item, sourceName) {
+      // 跨源去重：同一篇论文可能同时出现在多个 Crossref 查询里
+      var key = String(item.link || item.title || '').toLowerCase();
+      var tk = String(item.title || '').toLowerCase().replace(/\s+/g, ' ');
+      if (seenTitles[key] || seenTitles[tk]) return;
+      seenTitles[key] = 1;
+      seenTitles[tk] = 1;
+      items.push(Object.assign({ _source: sourceName }, item));
+    }
     if (state.activeNewsTab === 'all') {
       sources.forEach(function (s) {
-        (s[1].items || []).forEach(function (item) {
-          items.push(Object.assign({ _source: s[1].name }, item));
-        });
+        (s[1].items || []).forEach(function (item) { pushItem(item, s[1].name); });
       });
     } else {
       var src = newsData[state.activeNewsTab];
       if (src) {
-        (src.items || []).forEach(function (item) {
-          items.push(Object.assign({ _source: src.name }, item));
-        });
+        (src.items || []).forEach(function (item) { pushItem(item, src.name); });
       }
     }
 
@@ -941,15 +1192,176 @@
         (item.title_zh ? '<div class="news-title-zh">' + escapeHtml(item.title_zh) + '</div>' : '') +
         '<div class="news-meta"><span>' + escapeHtml(item._source || '') + '</span>' + (date ? '<span>' + escapeHtml(date) + '</span>' : '') +
           (item.pdf ? '<button class="news-transcribe-btn" data-pdf="' + escapeHtml(item.pdf) + '" data-title="' + escapeHtml(item.title_zh || title) + '" title="下载开放获取 PDF 并直接送转写">送转写</button>' : '') +
+          '<button class="news-ablesci-btn' + (ablesciPendingOf(item.doi, title) ? ' is-queued' : '') + '" data-doi="' + escapeHtml(item.doi || '') + '" data-title="' + escapeHtml(title) + '" title="点一下就直接取全文：判开放获取 → 直下 → 核验 → 按标题归档进文献库 → 自动送转写；闭源的才会走科研通求助">' + (ablesciPendingOf(item.doi, title) ? '处理中…' : '下载全文') + '</button>' +
           '<button class="news-quick-add-btn" data-title="' + escapeHtml(item.title_zh || title) + '" data-title-en="' + escapeHtml(item.title_zh ? title : '') + '" data-url="' + escapeHtml(link) + '" data-summary="' + escapeHtml(summary) + '" data-source="' + escapeHtml(item._source || '') + '" title="只收录标题与摘要到卡片库，不转写全文">收录</button>' +
         '</div>' +
         '<div class="news-flags">' +
           (isAlreadyInLibrary(title) ? '<span class="news-owned">已入库</span>' : '') +
+          (item.doi ? '<span class="news-doi" title="点击复制 DOI">DOI ' + escapeHtml(item.doi) + '</span>' : '') +
+          '<span class="news-doi news-title-copy" data-copy-title="' + escapeHtml(title) + '" title="点击复制论文标题（可直接粘到科研通/学术搜索）">⧉ 标题</span>' +
           (item.matched && item.matched.length ? '<span class="news-matched">相关：' + item.matched.map(function (m) { return escapeHtml(m); }).join(' · ') + '</span>' : '') +
         '</div>' +
         (summary ? '<div class="news-summary">' + escapeHtml(summary) + '</div>' : '') +
         '</a>';
     }).join('');
+  }
+
+  // ===== 文献下载捷径：科研通（AbleSci）文献互助 =====
+  // 科研通的求助流程是「粘贴 DOI → 智能获取 → 提交」，所以这里只管两件事：
+  // ① 把 DOI（没有 DOI 就用标题）写进剪贴板；② 打开求助发布页，用户粘贴即可。
+  function copyToClipboard(text) {
+    text = String(text || '').trim();
+    if (!text) return Promise.reject(new Error('empty'));
+    function legacyCopy() {
+      return new Promise(function (resolve, reject) {
+        try {
+          var ta = document.createElement('textarea');
+          ta.value = text;
+          ta.style.position = 'fixed';
+          ta.style.opacity = '0';
+          document.body.appendChild(ta);
+          ta.select();
+          var ok = document.execCommand('copy');
+          document.body.removeChild(ta);
+          ok ? resolve() : reject(new Error('execCommand failed'));
+        } catch (err) { reject(err); }
+      });
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      // 权限被拒（非用户手势 / 非 https 上下文）时退回 execCommand，别直接报失败
+      return navigator.clipboard.writeText(text).catch(legacyCopy);
+    }
+    return legacyCopy();
+  }
+
+  function askOnAblesci(doi, title) {
+    // 「下载全文」= 点了就立刻去取：服务端先自己判 OA 直下、核验、按标题归档、送转写；
+    // 出版商拦服务端（MDPI 等 403）时，服务端把 PDF 直链返回来，这里替你打开浏览器下载，
+    // 落盘后由服务端监听下载目录自动归档——全程不弹问题、不等整点巡检。
+    if (!doi && !title) { toast('这条资讯没有 DOI 或标题，取不了全文'); return Promise.resolve(); }
+    toast('正在取全文…');
+    return fetch('/api/ablesci/download', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ doi: doi || '', title: title || '' })
+    }).then(function (r) { return r.json(); }).then(function (d) {
+      if (d && d.ok) {
+        toast('已下载并归档到文献库：' + (d.name || '') +
+          (d.transcribe ? '（已送转写）' : ''));
+        if (typeof loadPdfInbox === 'function') loadPdfInbox();
+        ablesciLoad();
+        return;
+      }
+      if (d && d.need_browser) {
+        // OA 直链被出版商挡在服务端，用你的浏览器来下；服务端会盯着下载目录自动归档
+        window.open(d.need_browser, '_blank', 'noopener');
+        toast('已用浏览器打开 PDF 直链，下载完成后会自动归档并送转写（约 10 秒内）');
+        if (typeof pollPendingDownloads === 'function') pollPendingDownloads();
+        ablesciLoad();
+        return;
+      }
+      toast('这篇是闭源的，已加入待发求助队列，我会替你发求助（' + (d && d.error ? d.error : '') + '）');
+      if (d && d.points_low) toast('提醒：科研通积分只剩 ' + d.points + ' 分，发一条求助要 10 分，先去签到拿积分');
+      ablesciLoadPoints();
+      ablesciLoad();
+    }).catch(function () {
+      // 本地服务不可用时退回手动流程：打开科研通发布页，DOI 已在剪贴板里
+      copyToClipboard(doi || title).then(function () { toast('已复制，可粘到科研通手动提交'); }, function () {});
+      window.open('https://www.ablesci.com/assist/create', '_blank', 'noopener');
+    });
+  }
+
+  // 浏览器直链下载后，服务端监听线程会在十几秒内归档；这里顺手轮询刷新文献库列表
+  function pollPendingDownloads() {
+    var n = 0;
+    var timer = setInterval(function () {
+      n++;
+      if (typeof loadPdfInbox === 'function') loadPdfInbox();
+      if (n >= 12) clearInterval(timer);
+    }, 5000);
+  }
+
+  // ===== 求助队列状态（页面上的进度反馈） =====
+  function ablesciPendingOf(doi, title) {
+    var list = state.ablesci.pending || [];
+    for (var i = 0; i < list.length; i++) {
+      var it = list[i];
+      if (doi && it.doi && String(it.doi).toLowerCase() === String(doi).toLowerCase()) return it;
+      if (!doi && title && it.title === title) return it;
+    }
+    return null;
+  }
+
+  function ablesciLoad() {
+    return api('/api/ablesci/queue').then(function (d) {
+      if (!d || !d.ok) return;
+      state.ablesci = { pending: d.pending || [], done: d.done || [], at: d.server_time || null };
+      ablesciRenderStatus();
+      renderNews();
+    }).catch(function () {});
+  }
+
+  // 科研通积分（没钱发求助时提醒）
+  function ablesciLoadPoints() {
+    return api('/api/ablesci/points').then(function (d) {
+      if (!d || !d.ok) return;
+      state.ablesciPoints = { points: d.points, at: d.at, low: !!d.low };
+      ablesciRenderPoints();
+    }).catch(function () {});
+  }
+
+  function ablesciRenderPoints() {
+    var el = $('#ablesciPoints');
+    if (!el) return;
+    var s = state.ablesciPoints || {};
+    if (s.points === null || s.points === undefined) { el.hidden = true; return; }
+    el.hidden = false;
+    var low = s.points < 10;
+    el.className = 'ablesci-points' + (low ? ' low' : '');
+    el.textContent = low
+      ? ('积分 ' + s.points + ' · 该签到了')
+      : ('积分 ' + s.points);
+    el.title = '科研通积分 ' + s.points + (low ? '（不够发一条求助，去 ablesci 签到拿积分）' : '') +
+      '（' + (s.at || '') + ' 读取）';
+  }
+
+  function ablesciRenderStatus() {
+    var el = $('#ablesciStatus');
+    if (!el) return;
+    var p = state.ablesci.pending || [];
+    // 已经结束的不再显示：这张卡只回答「现在还有什么在排队 / 在等」
+    if (!p.length) {
+      el.hidden = true;
+      el.innerHTML = '';
+      return;
+    }
+    el.hidden = false;
+    var head = [];
+    var autoN = p.filter(function (x) { return x.oa_state === 'done'; }).length;
+    head.push('<span class="ablesci-chip pending">排队中 ' + p.length + ' 篇</span>');
+    var rows = '';
+    p.forEach(function (it) {
+      var t = String(it.title || it.doi || '（无标题）');
+      var badge = '';
+      if (it.oa_state === 'oa_link') badge = '<span class="ablesci-tag ok">OA 可直下</span>';
+      else if (it.oa_state === 'assist_pending') badge = '<span class="ablesci-tag ok">已有应助</span>';
+      else if (it.oa_state === 'no') badge = '<span class="ablesci-tag no">需求助</span>';
+      else if (it.oa_state === 'verify_fail') badge = '<span class="ablesci-tag warn">疑似错件</span>';
+      var pdfBtn = it.oa_pdf_url
+        ? '<a class="ablesci-pdf" href="' + escapeHtml(it.oa_pdf_url) + '" target="_blank" rel="noopener" title="用浏览器直接下载这份 OA PDF">PDF 直链</a>'
+        : '';
+      rows += '<li class="ablesci-item pending">' +
+        '<span class="ablesci-dot"></span>' +
+        '<span class="ablesci-name" title="' + escapeHtml(t) + '">' + escapeHtml(t.length > 78 ? t.slice(0, 78) + '…' : t) + '</span>' +
+        badge +
+        '<span class="ablesci-meta">' + escapeHtml(it.doi || '') + (it.auto_check ? ' · 自动检查 ' + escapeHtml(it.auto_check) : '') +
+          (it.note ? ' · ' + escapeHtml(String(it.note).slice(0, 70)) : '') + '</span>' +
+        pdfBtn +
+        '<button class="ablesci-cancel" data-id="' + escapeHtml(it.id) + '" title="不再处理这条">取消</button>' +
+        '</li>';
+    });
+    el.innerHTML = '<div class="ablesci-bar">' + head.join('') + '</div>' +
+      (rows ? '<ul class="ablesci-list">' + rows + '</ul>' : '');
   }
 
   // ===== 已入库标记：资讯条目 ↔ 卡片库标题匹配 =====
@@ -996,8 +1408,10 @@
     var today = new Date().toISOString().slice(0, 10);
 
     var freshCount = 0;
+    var hfNow = state.hotFeed || {};
+    var hfTodayItems = (hfNow.items || []).filter(function (it) { return it.cat !== 'blogger' && it.date === today; });
+    if (hfTodayItems.length) freshCount++;
     if (fr.length && fr[0].date === today) freshCount++;
-    if (hs.length && hs[0].date === today) freshCount++;
 
     var html = '';
     html += '<div class="today-head">' +
@@ -1019,7 +1433,7 @@
     } else {
       html += pending.slice(0, 4).map(function (t, i) {
         return '<div class="today-todo" data-goto="todos">' +
-          '<span class="today-todo-dot"></span>' +
+          '<button class="today-todo-check" data-todo-check="' + t.id + '" aria-label="标记完成" title="勾上就算完成，和「待办」面板是同一份"></button>' +
           '<span class="today-todo-text">' + escapeHtml(t.text) + '</span>' +
           '</div>';
       }).join('');
@@ -1029,13 +1443,31 @@
     }
     html += '</div>';
 
-    // 2. 今日情报
+    // 2. 今日情报：按改版后的真实口径展示（热点已合并成「今日十条」一条流，
+    //    不再有上午/下午两栏日报；科技博主归科技周报）
     html += '<div class="today-col">' +
       '<div class="today-col-head">今日情报</div>';
+    var hf = state.hotFeed || {};
+    var hfItems = (hf.items || []).filter(function (it) { return it.cat !== 'blogger'; });
+    var hfBlog = (hf.items || []).filter(function (it) { return it.cat === 'blogger'; });
     var feeds = [];
-    if (fr.length) feeds.push({ panel: 'frontier', name: '前沿瞭望', latest: fr[0].date, isNew: fr[0].date === today });
-    if (hs.length) feeds.push({ panel: 'hotspots', name: '热点日报', latest: hs[0].date + ' ' + (hs[0].session || ''), isNew: hs[0].date === today });
-    if (wk.length) feeds.push({ panel: 'weekly', name: '科技周报', latest: '第 ' + wk[0].issue + ' 期', isNew: false });
+    if (hfItems.length) {
+      feeds.push({
+        panel: 'hotspots',
+        name: '热点日报',
+        latest: ((state.hotPicks && state.hotPicks.length) || 10) + ' 条 / 池子 ' + hfItems.length + ' 条',
+        extra: '上一个 9 点后 24 小时' + ((hf.generated || hf.fetched_at) ? (' · 抓取 ' + (hf.generated || hf.fetched_at)) : ''),
+        isNew: true
+      });
+    }
+    if (wk.length || hfBlog.length) {
+      feeds.push({
+        panel: 'weekly',
+        name: '科技周报',
+        latest: hfBlog.length ? ('全球博主近 7 天热帖 ' + hfBlog.length + ' 条') : '待抓取',
+        isNew: false
+      });
+    }
     if (!feeds.length) {
       html += '<div class="today-empty">最近还没有情报归档</div>';
     } else {
@@ -1044,6 +1476,7 @@
           (f.isNew ? '<span class="today-new">新</span>' : '') +
           '<span class="today-feed-name">' + escapeHtml(f.name) + '</span>' +
           '<span class="today-feed-latest">' + escapeHtml(f.latest) + '</span>' +
+          (f.extra ? '<span class="today-feed-extra">' + escapeHtml(f.extra) + '</span>' : '') +
           '</div>';
       }).join('');
     }
@@ -1058,7 +1491,7 @@
       html += papers.map(function (s) {
         var t = s.title || s.title_en || '未命名论文';
         return '<div class="today-paper" data-goto="summaries">' +
-          '<span class="today-paper-title">' + escapeHtml(t) + '</span>' +
+          '<span class="today-paper-title" title="' + escapeHtml(t) + '">' + escapeHtml(t) + '</span>' +
           '<span class="today-paper-date">' + escapeHtml((s.created_at || '').slice(0, 10)) + '</span>' +
           '</div>';
       }).join('');
@@ -1107,13 +1540,15 @@
 
   // ===== 渲染：科技爱好者周刊（hs-item 归档风格，与其余日报面板统一） =====
   function loadWeekly(force) {
-    var container = $('#weeklyList');
-    if (!container) return;
+    // 阮一峰周刊归档那一段已按用户要求撤掉，页面上不再有 #weeklyList；
+    // 这里只负责把数据取回来（概览的「今日情报」还要用它），渲染时按容器是否存在跳过。
     return api('/api/weekly' + (force ? '?refresh=1' : '')).then(function (data) {
       state.weekly = data;
       renderWeekly();
       renderTodayBoard(); renderWeekReview();
     }).catch(function () {
+      var container = $('#weeklyList');
+      if (!container) return;
       container.innerHTML =
         '<div class="hs-empty">' +
         '<div class="hs-empty-icon">' + HS_ICONS.weekly + '</div>' +
@@ -1234,11 +1669,16 @@
     var sections = (state.overview && state.overview.sections) || [];
     container.innerHTML = sections.map(function (s, i) {
       var icon = SECTION_ICONS[s.folder] || SECTION_ICONS['08_临时中转'];
+      var files = (s.recent || []).map(function (p) {
+        var name = String(p).split(/[\\/]/).pop();
+        return '<div class="section-file" data-file="' + escapeHtml(p) + '" title="' + escapeHtml(p) + '">' + escapeHtml(name) + '</div>';
+      }).join('');
       return '<div class="section-card" data-path="' + escapeHtml(s.folder) + '" style="animation-delay:' + (i * 0.06) + 's">' +
         '<div class="section-icon">' + icon + '</div>' +
         '<div class="section-name">' + escapeHtml(s.label) + '</div>' +
         '<div class="section-path">' + escapeHtml(s.folder) + '/</div>' +
         '<div class="section-stats"><span>' + s.count + '</span> 个文件</div>' +
+        (files ? '<div class="section-files">' + files + '</div>' : '') +
         '</div>';
     }).join('');
   }
@@ -1275,7 +1715,6 @@
     container.innerHTML = items.map(function (j, i) {
       var type = j.type || '日常';
       return '<div class="timeline-item" style="animation-delay:' + (i * 0.08) + 's">' +
-        '<div class="timeline-dot"></div>' +
         '<div class="journal-card">' +
         '<div class="journal-card-head">' +
         '<span class="journal-card-date">' + escapeHtml(j.date || j.created || '') + '</span>' +
@@ -1341,6 +1780,16 @@
   // ============================================================
   // 文献工具：术语表
   // ============================================================
+  // 术语表的「外部搜索」：本地词条查不到，就把这个词丢给全网学术搜索
+  function openGlossarySearch(kind) {
+    var q = (state.glossaryQuery || '').trim();
+    if (!q) { toast('先输入术语，再去外部搜索'); return; }
+    var url = kind === 'semantic'
+      ? 'https://www.semanticscholar.org/search?q=' + encodeURIComponent(q) + '&sort=relevance'
+      : 'https://scholar.google.com/scholar?q=' + encodeURIComponent(q);
+    window.open(url, '_blank', 'noopener');
+  }
+
   function renderGlossary() {
     var container = $('#glossaryList');
     if (!state.lit.glossary) return;
@@ -1359,8 +1808,17 @@
       return;
     }
     container.innerHTML = items.map(function (g, i) {
+      var term = escapeHtml(g.term || '');
+      var scholar = 'https://scholar.google.com/scholar?q=' + encodeURIComponent(g.term || '');
+      var semantic = 'https://www.semanticscholar.org/search?q=' + encodeURIComponent(g.term || '') + '&sort=relevance';
       return '<div class="glossary-item" style="animation-delay:' + (i * 0.03) + 's">' +
-        '<div class="glossary-term">' + escapeHtml(g.term || '') + '</div>' +
+        '<div class="glossary-term-row">' +
+          '<a class="glossary-term glossary-term-link" href="' + scholar + '" target="_blank" rel="noopener" title="点术语直接去 Google Scholar 搜这个方向的文献">' + term + '</a>' +
+          '<span class="glossary-ext-links">' +
+            '<a href="' + scholar + '" target="_blank" rel="noopener" title="Google Scholar">Scholar ↗</a>' +
+            '<a href="' + semantic + '" target="_blank" rel="noopener" title="Semantic Scholar">Semantic ↗</a>' +
+          '</span>' +
+        '</div>' +
         (g.full_name && g.full_name !== '—' ? '<div class="glossary-full">' + escapeHtml(g.full_name) + '</div>' : '') +
         (g.zh && g.zh !== '—' ? '<div class="glossary-zh">' + escapeHtml(g.zh) + '</div>' : '') +
         (g.plain_explanation ? '<div class="glossary-explain">' + escapeHtml(g.plain_explanation) + '</div>' : '') +
@@ -1374,19 +1832,57 @@
   function renderQueries() {
     var container = $('#queryList');
     if (!state.lit.queries) return;
-    container.innerHTML = state.lit.queries.items.map(function (q, i) {
-      return '<div class="query-item" style="animation-delay:' + (i * 0.05) + 's">' +
-        '<div class="query-label">' + escapeHtml(q.label || '') + '</div>' +
-        '<div class="query-code">' + escapeHtml(q.query || '') + '</div>' +
-        '<div class="query-meta">' +
-        (q.returned_count ? '<span class="count">返回 ' + q.returned_count + ' 条</span>' : '') +
-        (q.verified_on ? '<span>验证于 ' + escapeHtml(q.verified_on) + '</span>' : '') +
-        '<button class="btn-copy" data-query="' + i + '">复制</button>' +
-        '</div>' +
-        (q.purpose ? '<div class="query-purpose">' + escapeHtml(q.purpose) + '</div>' : '') +
-        (q.query_syntax_note ? '<div class="query-purpose" style="color:var(--text-muted);">语法：' + escapeHtml(q.query_syntax_note) + '</div>' : '') +
-        '</div>';
-    }).join('');
+    var d = state.lit.queries;
+    var items = d.items || [];
+    var groups = d.groups || [];
+    // 有新结构（groups）就按六个方向分组渲染；老数据没有 groups 就退回平铺
+    if (!groups.length) {
+      container.innerHTML = items.map(queryItemHtml).join('');
+      return;
+    }
+    var html = ['<div class="query-groups">'];
+    groups.forEach(function (g, gi) {
+      var inGroup = items.filter(function (q) { return q.group === g.name; });
+      html.push('<div class="query-group" style="animation-delay:' + (gi * 0.04) + 's">');
+      html.push('<div class="query-group-head">');
+      html.push('<span class="query-group-name">' + escapeHtml(g.name) + '</span>');
+      if (g.name_en) html.push('<span class="query-group-en">' + escapeHtml(g.name_en) + '</span>');
+      html.push('<span class="query-group-count">' + inGroup.length + ' 条检索式</span>');
+      html.push('</div>');
+      if ((g.keywords_zh || []).length || (g.keywords_en || []).length) {
+        html.push('<div class="query-kw-rows">');
+        if ((g.keywords_zh || []).length) {
+          html.push('<div class="query-kw-row"><span class="query-kw-label">中文关键词</span>' +
+            g.keywords_zh.map(function (k) { return '<span class="query-kw">' + escapeHtml(k) + '</span>'; }).join('') + '</div>');
+        }
+        if ((g.keywords_en || []).length) {
+          html.push('<div class="query-kw-row"><span class="query-kw-label">英文关键词</span>' +
+            g.keywords_en.map(function (k) { return '<span class="query-kw query-kw-en">' + escapeHtml(k) + '</span>'; }).join('') + '</div>');
+        }
+        html.push('</div>');
+      }
+      html.push(inGroup.map(function (q) {
+        return queryItemHtml(q, items.indexOf(q));
+      }).join(''));
+      html.push('</div>');
+    });
+    html.push('</div>');
+    container.innerHTML = html.join('');
+  }
+
+  function queryItemHtml(q, idx) {
+    if (idx === undefined) idx = 0;
+    return '<div class="query-item">' +
+      '<div class="query-label">' + escapeHtml(q.label || '') + '</div>' +
+      '<div class="query-code">' + escapeHtml(q.query || '') + '</div>' +
+      '<div class="query-meta">' +
+      (q.returned_count ? '<span class="count">返回 ' + q.returned_count + ' 条</span>' : '') +
+      (q.verified_on ? '<span>验证于 ' + escapeHtml(q.verified_on) + '</span>' : '') +
+      '<button class="btn-copy" data-query="' + idx + '">复制</button>' +
+      '</div>' +
+      (q.purpose ? '<div class="query-purpose">' + escapeHtml(q.purpose) + '</div>' : '') +
+      (q.query_syntax_note ? '<div class="query-purpose" style="color:var(--text-muted);">语法：' + escapeHtml(q.query_syntax_note) + '</div>' : '') +
+      '</div>';
   }
 
   // ============================================================
@@ -1403,12 +1899,15 @@
     var container = $('#arxivList');
     if (!container || !state.lit.arxiv) return;
     var d = state.lit.arxiv;
+    var SRC_LABEL = { arxiv: 'arXiv', crossref: 'Crossref', semanticscholar: 'Semantic Scholar' };
     if (!d.ok) {
       container.innerHTML =
         '<div class="hs-empty">' +
         '<div class="hs-empty-icon">' + HS_ICONS.signal + '</div>' +
-        '<div class="hs-empty-text">arXiv 暂时连不上</div>' +
-        '<div class="hs-empty-hint">' + escapeHtml(d.error || '网络层受阻') + '<br>arXiv 出口网络恢复后点「刷新」即可；不影响其他文献工具</div>' +
+        '<div class="hs-empty-text">三个平台都没取到结果</div>' +
+        '<div class="hs-empty-hint">' + escapeHtml(d.error || '网络层受阻') +
+        (d.fallback_errors && d.fallback_errors.length ? '<br>' + escapeHtml(d.fallback_errors.join('；')) : '') +
+        '<br>arXiv 出口被限流时这里会自动退到 Crossref / Semantic Scholar，点「刷新」重试即可</div>' +
         '</div>';
       return;
     }
@@ -1416,19 +1915,28 @@
       container.innerHTML = '<div style="color:var(--text-muted);text-align:center;padding:32px;">暂无条目</div>';
       return;
     }
-    container.innerHTML = d.items.map(function (p, i) {
-      return '<div class="arxiv-item" style="animation-delay:' + (i * 0.04) + 's">' +
-        '<div class="arxiv-main">' +
-        '<a class="arxiv-title" href="' + escapeHtml(p.link) + '" target="_blank" rel="noopener">' + escapeHtml(p.title) + '</a>' +
-        (p.summary ? '<div class="arxiv-abs">' + escapeHtml(p.summary) + '</div>' : '') +
-        '<div class="arxiv-meta">' +
-        '<span class="arxiv-id">' + escapeHtml((p.link || '').replace('http://arxiv.org/abs/', 'arXiv:').replace('https://arxiv.org/abs/', 'arXiv:')) + '</span>' +
-        (p.authors ? '<span>' + escapeHtml(p.authors) + '</span>' : '') +
-        '<span>' + escapeHtml(p.date || '') + '</span>' +
-        '</div>' +
-        '</div>' +
-        '</div>';
-    }).join('');
+    var src = d.source || 'arxiv';
+    var srcLabel = SRC_LABEL[src] || src;
+    container.innerHTML =
+      '<div class="arxiv-srcbar">来源：<span class="arxiv-src">' + escapeHtml(srcLabel) + '</span>' +
+      (d.fetched_at ? '<span class="arxiv-src-time">抓取于 ' + escapeHtml(d.fetched_at) + '</span>' : '') +
+      (d.fallback_errors && d.fallback_errors.length ? '<span class="arxiv-src-warn">已自动降级：' + escapeHtml(d.fallback_errors[0]) + '</span>' : '') +
+      '</div>' +
+      d.items.map(function (p, i) {
+        var pSrc = p.source || src;
+        return '<div class="arxiv-item" style="animation-delay:' + (i * 0.04) + 's">' +
+          '<div class="arxiv-main">' +
+          '<a class="arxiv-title" href="' + escapeHtml(p.link) + '" target="_blank" rel="noopener">' + escapeHtml(p.title) + '</a>' +
+          (p.summary ? '<div class="arxiv-abs">' + escapeHtml(p.summary) + '</div>' : '') +
+          '<div class="arxiv-meta">' +
+          '<span class="arxiv-badge arxiv-badge-' + escapeHtml(pSrc) + '">' + escapeHtml(SRC_LABEL[pSrc] || pSrc) + '</span>' +
+          (p.journal ? '<span class="arxiv-journal">' + escapeHtml(p.journal) + '</span>' : '') +
+          (p.authors ? '<span>' + escapeHtml(p.authors) + '</span>' : '') +
+          '<span>' + escapeHtml(p.date || '') + '</span>' +
+          '</div>' +
+          '</div>' +
+          '</div>';
+      }).join('');
   }
 
   // ============================================================
@@ -1577,14 +2085,25 @@
   function renderFrontier() {
     var container = $('#frontierList');
     if (!container) return;
-    var items = (state.frontier && state.frontier.items) || [];
+    var all = (state.frontier && state.frontier.items) || [];
+    var items = hsVisible(all, state.hsShowAllFr);
     refreshUnreadBadges();   // 徽标归侧栏统一管：未读红点 / 已读总数
-    if (items.length === 0) {
+    if (all.length === 0) {
       container.innerHTML =
         '<div class="hs-empty">' +
         '<div class="hs-empty-icon">' + HS_ICONS.frontier + '</div>' +
         '<div class="hs-empty-text">前沿瞭望还没出过一期</div>' +
-        '<div class="hs-empty-hint">每天自动生成一期；也可将报纸风 HTML 放入 09_工作台程序/data/frontier/ 目录（命名 YYYY-MM-DD.html）</div>' +
+        '<div class="hs-empty-hint">每天自动生成一期；也可将报纸风 HTML 放入 data/frontier/ 目录（命名 YYYY-MM-DD.html）</div>' +
+        '</div>';
+      return;
+    }
+    if (items.length === 0) {
+      container.innerHTML =
+        '<div class="hs-empty">' +
+        '<div class="hs-empty-icon">' + HS_ICONS.frontier + '</div>' +
+        '<div class="hs-empty-text">今天还没有新的一期</div>' +
+        '<div class="hs-empty-hint">每天 09:30 自动生成一期' +
+        '<button class="hs-more" data-toggle="all">看历史归档（' + all.length + ' 期）</button></div>' +
         '</div>';
       return;
     }
@@ -1593,35 +2112,64 @@
     items.forEach(function (d, i) {
       if (d.date !== lastDate) {
         if (lastDate !== null) html.push('</div>');
-        html.push('<div class="hs-day-group"><div class="hs-day-label">' + escapeHtml(d.date) + '</div>');
+        html.push('<div class="hs-day-group"><div class="hs-day-label">' + escapeHtml(dsDateLabel(d.date)) + '</div>');
         lastDate = d.date;
       }
       var sizeKb = (d.size / 1024).toFixed(1);
+      // 列表项本身就是超链接：普通单击在本面板内展开全文，组合键才开新标签页
       html.push(
-        '<div class="hs-item" data-file="' + escapeHtml(d.file) + '" style="animation-delay:' + (i * 0.04) + 's">' +
+        '<a class="hs-item hs-item-link" href="/frontier/' + encodeURIComponent(d.file) + '" target="_blank" rel="noopener" data-file="' + escapeHtml(d.file) + '" style="animation-delay:' + (i * 0.04) + 's">' +
           '<span class="hs-session hs-session-fr">双通道</span>' +
           '<div class="hs-item-main">' +
-            '<div class="hs-item-title">前沿瞭望 · ' + escapeHtml(d.date) + '</div>' +
+            '<div class="hs-item-title hs-item-title-link">前沿瞭望 · ' + escapeHtml(d.date) + '</div>' +
             '<div class="hs-item-meta">' + sizeKb + ' KB · 归档于 ' + escapeHtml(d.modified || '') + '</div>' +
           '</div>' +
-          '<div class="hs-item-arrow">展开 →</div>' +
-        '</div>'
+          '<div class="hs-item-arrow">点开阅读 →</div>' +
+        '</a>'
       );
     });
     html.push('</div>');
+    if (all.length > items.length) {
+      html.push('<button class="hs-more" data-toggle="all">还有 ' + (all.length - items.length) + ' 期历史归档，点开查看</button>');
+    } else if (state.hsShowAllFr) {
+      html.push('<button class="hs-more" data-toggle="today">只看今天</button>');
+    }
     container.innerHTML = html.join('');
   }
 
+  // 日期标签：今天/昨天单独标出来，别让人以为在看旧东西
+  function dsDateLabel(date) {
+    var t = hsTodayIso();
+    if (date === t) return '今天 · ' + date;
+    var y = new Date();
+    y.setDate(y.getDate() - 1);
+    var ym = ('0' + (y.getMonth() + 1)).slice(-2);
+    var yd = ('0' + y.getDate()).slice(-2);
+    if (date === (y.getFullYear() + '-' + ym + '-' + yd)) return '昨天 · ' + date;
+    return date;
+  }
+
   function openFrontier(file) {
-    var url = '/frontier/' + encodeURIComponent(file);
-    $('#frontierOpenTab').href = url;
-    $('#frontierDetailTitle').textContent = '前沿瞭望 · ' + file.replace(/\.html$/, '');
-    $('#frontierListView').style.display = 'none';
-    $('#frontierDetailView').style.display = 'block';
-    pushReportHash('frontier', file);
-    var frame = $('#frontierFrame');
+    openReportView('frontier', file);
+  }
+
+  function closeFrontier() {
+    closeReportView();
+  }
+
+  // 统一详情视图：热点日报与前沿瞭望共用一个 frame（两栏已经合并到一个面板里）
+  function openReportView(kind, file) {
+    var base = kind === 'frontier' ? '/frontier/' : '/hotspot/';
+    var url = base + encodeURIComponent(file);
+    var stem = file.replace(/\.html$/, '');
+    var label = kind === 'frontier' ? '前沿瞭望 · ' : '热点日报 · ';
+    $('#hotspotOpenTab').href = url;
+    $('#hotspotDetailTitle').textContent = label + stem;
+    $('#hotspotsListView').style.display = 'none';
+    $('#hotspotsDetailView').style.display = 'block';
+    pushReportHash(kind, file);
+    var frame = $('#hotspotFrame');
     frame.innerHTML = '<div style="text-align:center;padding:60px 20px;color:var(--text-secondary);">加载中…</div>';
-    // fetch HTML，提取 body 内容直接注入（自动继承工作台主题）
     fetch(url).then(function (resp) { return resp.text(); }).then(function (html) {
       injectArchivedPaper(frame, html);
     }).catch(function () {
@@ -1631,10 +2179,10 @@
     if (scrollBox) scrollBox.scrollTop = 0;
   }
 
-  function closeFrontier() {
-    $('#frontierFrame').innerHTML = '';
-    $('#frontierListView').style.display = 'block';
-    $('#frontierDetailView').style.display = 'none';
+  function closeReportView() {
+    $('#hotspotFrame').innerHTML = '';
+    $('#hotspotsListView').style.display = 'block';
+    $('#hotspotsDetailView').style.display = 'none';
   }
 
   // ============================================================
@@ -1648,17 +2196,374 @@
     });
   }
 
+  // ============================================================
+  // 今日热点 · 前沿：六类资讯合并成一条流（每条直达原文）
+  // 注意：资讯面板走原来的 /api/news 分源流，这里独立占一条（#hotFeedList）
+  // ============================================================
+  function hotStillLoading(data) {
+    return !!(data && data.loading && !((data.items || []).length));
+  }
+
+  function hotLoadingNotice() {
+    if (state.hotLoading) return;
+    state.hotLoading = true;
+    var c = $('#hotDigest');
+    if (c && !(c.querySelectorAll('.hs-digest-item, .hs-item').length)) {
+      c.innerHTML = '<div class="hs-empty"><div class="hs-empty-text">正在抓取今日热点…</div>' +
+        '<div class="hs-empty-hint">第一次抓取要跑十几个源，通常一两分钟；抓完会自动显示，不用手动刷新</div></div>';
+    }
+    // 科技周报吃的是同一份博主流，抓取期间也别空着
+    var b = $('#bloggerList');
+    if (b && !b.querySelectorAll('.hs-item').length) {
+      b.innerHTML = '<div class="hs-empty"><div class="hs-empty-text">正在抓取博主热帖…</div>' +
+        '<div class="hs-empty-hint">抓完会自动显示，不用手动刷新</div></div>';
+    }
+    setTimeout(function () { state.hotLoading = false; loadHotFeed(); }, 15000);
+  }
+
+  function loadHotFeed(force) {
+    // 以上一个 9 点为界、此前 24 小时：先按 1 天窗口抓；凑不满 10 条再自动放宽到 2 天
+    var days = state.hotDays || 1;
+    var url = '/api/news/feed?days=' + days + (force ? '&refresh=1' : '');
+    return api(url).then(function (data) {
+      // 后台还在抓第一份缓存：先给一行提示，15 秒后自己再来问，不用用户点刷新
+      if (hotStillLoading(data)) { hotLoadingNotice(); return data; }
+      state.hotLoading = false;
+      var n = (data.items || []).filter(function (it) { return it.cat !== 'blogger'; }).length;
+      if (n < 10 && days === 1) return api('/api/news/feed?days=2').then(function (d2) { return d2; });
+      return data;
+    }).then(function (data) {
+      if (hotStillLoading(data)) { hotLoadingNotice(); return; }
+      state.hotLoading = false;
+      state.hotFeed = data;
+      renderHotFeed();
+      renderBloggers();
+      renderTodayBoard();
+      refreshUnreadBadges();
+    }).catch(function () {
+      var c = $('#hotFeedList');
+      if (c) {
+        c.style.display = '';
+        c.innerHTML = '<div class="hs-empty"><div class="hs-empty-text">资讯拉取失败</div>' +
+          '<div class="hs-empty-hint">点右上角「刷新」重试；各源独立抓取，单个源挂掉不影响其他类</div></div>';
+      }
+    });
+  }
+
+  // 推送机制（用户 2026-11-07 / 11-08 要求）：
+  // 每天 9 点为节点，取此前 24 小时内最值得看的 10 件事（不限专业，科技/世界/金融/重大国际事件都算）；
+  // 每篇后面给 👍 / 👎，点赞的类别以后多推、点踩的少推；只在「今日十条」一处列出，不再上下重复。
+  var HOT_PICK_N = 10;
+  var HOT_PREF_KEY = 'wb_hot_prefs_v1';
+  var HOT_VOTE_KEY = 'wb_hot_votes_v1';
+  // 六类基础权重拉平：这是「昨天发生了什么大事」，不是只挑本专业
+  var HOT_CAT_ORDER = { world: 5, industry: 5, prof: 5, finance: 4, global: 4 };
+
+  function hotPrefs() {
+    try {
+      var v = JSON.parse(localStorage.getItem(HOT_PREF_KEY) || '{}');
+      return (v && typeof v === 'object') ? v : {};
+    } catch (e) { return {}; }
+  }
+
+  function hotPrefBump(cat) {
+    if (!cat || cat === 'blogger') return;
+    var p = hotPrefs();
+    p[cat] = Math.min(6, (p[cat] || 0) + 1);
+    try { localStorage.setItem(HOT_PREF_KEY, JSON.stringify(p)); } catch (e) {}
+  }
+
+  function hotPrefReset() {
+    try { localStorage.removeItem(HOT_PREF_KEY); } catch (e) {}
+  }
+
+  // ---- 每条 👍 / 👎 ----
+  function hotVotes() {
+    try {
+      var v = JSON.parse(localStorage.getItem(HOT_VOTE_KEY) || '{}');
+      return (v && typeof v === 'object') ? v : {};
+    } catch (e) { return {}; }
+  }
+
+  function hotVoteOf(it) {
+    var v = hotVotes()[it.link];
+    return v === 1 ? 1 : (v === -1 ? -1 : 0);
+  }
+
+  // 点赞 → 这一类以后多推；点踩 → 这一类往后放（净票数由 hotCatWeight 现算）
+  function hotVote(it, v) {
+    var all = hotVotes();
+    if (all[it.link] === v) delete all[it.link];
+    else all[it.link] = v;
+    try { localStorage.setItem(HOT_VOTE_KEY, JSON.stringify(all)); } catch (e) {}
+  }
+
+  // 类别权重：历史「多推」偏好 + 本次 👍/👎 的净票数
+  function hotCatWeight(cat, prefs, votes) {
+    var base = HOT_CAT_ORDER[cat] || 0;
+    var like = 0, dislike = 0;
+    Object.keys(votes).forEach(function (link) {
+      if (!votes[link]) return;
+      var it = state.hotFeedItemByLink && state.hotFeedItemByLink[link];
+      var c = it ? it.cat : null;
+      if (c !== cat) return;
+      if (votes[link] === 1) like++; else dislike++;
+    });
+    return base + (prefs[cat] || 0) * 0.8 + like * 1.6 - dislike * 1.6;
+  }
+
+  function hotScore(it, ctx) {
+    var recency = 0;
+    if (it.date) {
+      var d = new Date(it.date + 'T00:00:00');
+      var days = (new Date() - d) / 86400000;
+      recency = Math.max(0, 4 - days);   // 越新越靠前，昨天也不算太旧
+    }
+    return hotCatWeight(it.cat, ctx.prefs, ctx.votes) * 1.4 + recency
+      + (it.summary ? 0.6 : 0) + (it.title_zh ? 0.3 : 0);
+  }
+
+  // 每类最多占 3 条，保证十条里既有专业也有科技/世界/金融，不出现整屏同一类
+  function pickHotItems(items, n) {
+    var prefs = hotPrefs();
+    var votes = hotVotes();
+    var ctx = { prefs: prefs, votes: votes };
+    var ranked = items.slice().sort(function (a, b) { return hotScore(b, ctx) - hotScore(a, ctx); });
+    var out = [];
+    var perCat = {};
+    for (var i = 0; i < ranked.length && out.length < (n || HOT_PICK_N); i++) {
+      var it = ranked[i];
+      if ((perCat[it.cat] || 0) >= 3) continue;
+      perCat[it.cat] = (perCat[it.cat] || 0) + 1;
+      out.push(it);
+    }
+    if (out.length < (n || HOT_PICK_N)) {
+      ranked.forEach(function (it) { if (out.length < (n || HOT_PICK_N) && out.indexOf(it) < 0) out.push(it); });
+    }
+    return out;
+  }
+
+  function renderHotFilters() {
+    var box = $('#hotFeedFilters');
+    if (!box) return;
+    var data = state.hotFeed || {};
+    var all = (data.items || []).filter(function (it) { return it.cat !== 'blogger'; });
+    var picks = state.hotPicks || [];
+    var cats = (data.cats || []).filter(function (c) { return c.key !== 'blogger'; });
+    var counts = {};
+    picks.forEach(function (it) { counts[it.cat] = (counts[it.cat] || 0) + 1; });
+    var chips = [
+      '<button class="news-filter' + (state.hotCat === 'all' ? ' active' : '') +
+      '" data-cat="all">今日十条 <span class="news-filter-num">' + picks.length + '</span></button>'
+    ];
+    cats.forEach(function (c) {
+      if (!counts[c.key]) return;
+      chips.push('<button class="news-filter news-filter-' + c.key + (state.hotCat === c.key ? ' active' : '') +
+        '" data-cat="' + c.key + '">' + escapeHtml(c.label) +
+        ' <span class="news-filter-num">' + counts[c.key] + '</span></button>');
+    });
+    if (picks.length) {
+      chips.push('<span class="news-filter-sep"></span>');
+      chips.push('<button class="news-filter news-filter-pref" data-pushmore="1" title="按你点过的 👍 / 👎 再挑十条">换一批</button>');
+    }
+    chips.push('<span class="news-filter-sep"></span>');
+    chips.push('<button class="news-filter' + (state.hotDays === 1 ? ' active' : '') + '" data-days="1">上一节点后 24 小时</button>');
+    chips.push('<button class="news-filter' + (state.hotDays === 2 ? ' active' : '') + '" data-days="2">近两天池子</button>');
+    box.innerHTML = chips.join('');
+    var stamp = $('#hotFeedStamp');
+    if (stamp) stamp.textContent = (data.generated || data.fetched_at || '') ? ('抓取于 ' + (data.generated || data.fetched_at)) : '';
+  }
+
+  // 双语标题：中文主标题 + 英文副标题（英文源自动补中文，中文源自动补英文）
+  function hotTitles(it) {
+    var raw = (it.title || '').trim();
+    var zh = (it.title_zh || '').trim();
+    var hasCJK = /[\u4e00-\u9fff]/.test(raw);
+    if (!zh && hasCJK) zh = raw;
+    var sub = '';
+    if (zh && zh !== raw) sub = raw;
+    else sub = (it.title_en || '').trim();
+    return { zh: zh || '', main: zh || raw, sub: sub };
+  }
+
+  // 今日十条：报纸式版头 + 每篇「双语标题 + 一句简介 + 原文 + 👍/👎」，全页只此一处
+  function renderHotDigest(picks) {
+    var box = $('#hotDigest');
+    if (!box) return;
+    if (!picks.length) { box.innerHTML = ''; return; }
+    var today = new Date();
+    var paperDate = today.getFullYear() + ' 年 ' + (today.getMonth() + 1) + ' 月 ' + today.getDate() + ' 日';
+    var poolN = (state.hotFeed && state.hotFeed.items)
+      ? state.hotFeed.items.filter(function (x) { return x.cat !== 'blogger'; }).length : 0;
+    box.innerHTML =
+      '<div class="hs-digest-mast">' +
+        '<div class="hs-digest-name">领域前沿 · 今日十条</div>' +
+        '<div class="hs-digest-date">' + paperDate + ' · 每日一刊</div>' +
+      '</div>' +
+      '<div class="hs-digest-note">以上一个 9 点为界，取此前 24 小时里最值得看的 10 件事（专业、科技、行业、金融、国际都算）' +
+        '。从 ' + poolN + ' 条里挑出，喜欢就 👍、不喜欢就 👎，下次照你的口味挑。</div>' +
+      '<div class="hs-digest-list">' +
+      picks.map(function (it, i) {
+        var tt = hotTitles(it);
+        // 中文一句话简介优先；没有就用原文摘要，再没有就给一句兜底提示，保证每条都有说明
+        var briefRaw = (it.brief_zh || it.summary || '').replace(/\s+/g, ' ').trim();
+        var brief = briefRaw.slice(0, 110);
+        var briefMore = briefRaw.length > 110;
+        if (!brief) {
+          brief = '这篇还没有中文简介，点标题看原文，简介正在后台生成。';
+        }
+        var vote = hotVoteOf(it);
+        return '<div class="hs-digest-row" data-idx="' + i + '">' +
+          '<span class="hs-digest-idx">' + (i + 1) + '</span>' +
+          '<div class="hs-digest-main">' +
+            '<a class="hs-digest-title" href="' + escapeHtml(it.link) + '" target="_blank" rel="noopener">' +
+              escapeHtml(tt.main) + '</a>' +
+            (tt.sub ? '<a class="hs-digest-title-en" href="' + escapeHtml(it.link) +
+              '" target="_blank" rel="noopener">' + escapeHtml(tt.sub) + '</a>' : '') +
+            '<div class="hs-digest-brief">' + escapeHtml(brief) + (briefMore ? '…' : '') + '</div>' +
+            '<div class="hs-digest-meta">' + escapeHtml(it.cat_label || '') + ' · ' + escapeHtml(it.source || '') +
+              (it.date ? ' · ' + escapeHtml(it.date) : '') +
+              ' · <a class="hs-digest-link" href="' + escapeHtml(it.link) + '" target="_blank" rel="noopener">原文 ↗</a>' +
+            '</div>' +
+          '</div>' +
+          '<div class="hs-digest-votes">' +
+            '<button class="hs-vote' + (vote === 1 ? ' on' : '') + '" data-vote="1" title="喜欢，这类多推">👍</button>' +
+            '<button class="hs-vote' + (vote === -1 ? ' on' : '') + '" data-vote="-1" title="不喜欢，这类少推">👎</button>' +
+          '</div>' +
+        '</div>';
+      }).join('') +
+      '</div>';
+  }
+
+  function renderHotFeed() {
+    var container = $('#hotFeedList');
+    var data = state.hotFeed || {};
+    // 科技博主归「科技周报」面板，不再混进热点流
+    var all = (data.items || []).filter(function (it) { return it.cat !== 'blogger'; });
+    state.hotFeedItemByLink = {};
+    all.forEach(function (it) { state.hotFeedItemByLink[it.link] = it; });
+    state.hotPicks = pickHotItems(all, HOT_PICK_N);
+    renderHotDigest(state.hotPicks);
+    renderHotFilters();
+    // 只在「今日十条」列一次：下面不再重复挂一份一样的卡片列表
+    if (container) {
+      container.style.display = 'none';
+      container.innerHTML = '';
+    }
+    if (all.length === 0 && container) {
+      container.style.display = '';
+      container.innerHTML =
+        '<div class="hs-empty">' +
+        '<div class="hs-empty-icon">' + HS_ICONS.hotspot + '</div>' +
+        '<div class="hs-empty-text">这一时间段还没有抓到资讯</div>' +
+        '<div class="hs-empty-hint">点右上角「刷新」重新抓取；也可以把时间段切到「近两天」</div>' +
+        '</div>';
+    }
+  }
+
+  // 科技周报：17 个博主源的近 7 天帖子，按「热度」排（同题多源命中 = 真热点），
+  // 每个源最多 2 条，保证一屏里是不同博主的不同话题。
+  var BLOG_SRC_WEIGHT = {
+    'OpenAI News': 3, 'Google DeepMind': 3, 'Hugging Face': 2.6, 'GitHub Blog': 2.6,
+    'Andrej Karpathy': 2.6, 'Gwern': 2.4, 'Latent Space': 2.2, 'Import AI · Jack Clark': 2.2,
+    'Simon Willison': 2, 'Sebastian Raschka': 2, 'The Gradient': 2,
+    '少数派': 1.5, '爱范儿': 1.5, 'Simon Willison': 2
+  };
+
+  function blogTokens(s) {
+    return String(s || '').toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]+/g, ' ')
+      .split(' ').filter(function (w) { return w.length >= 3; });
+  }
+
+  function blogOverlap(a, b) {
+    var sa = {}, n = 0;
+    blogTokens(a).forEach(function (w) { sa[w] = 1; });
+    blogTokens(b).forEach(function (w) { if (sa[w]) n++; });
+    return n;
+  }
+
+  function blogHeat(it, all) {
+    var dup = 0;
+    all.forEach(function (o) {
+      if (o.source === it.source) return;
+      if (blogOverlap(it.title, o.title) >= 2) dup++;
+    });
+    var rec = 0;
+    if (it.date) {
+      var d = new Date(it.date + 'T00:00:00');
+      rec = Math.max(0, 7 - (new Date() - d) / 86400000);
+    }
+    return dup * 2.5 + (BLOG_SRC_WEIGHT[it.source] || 1.2) + rec * 0.4 + (it.summary ? 0.4 : 0);
+  }
+
+  function renderBloggers() {
+    var box = $('#bloggerList');
+    if (!box) return;
+    var data = state.hotFeed || {};
+    var items = (data.items || []).filter(function (it) { return it.cat === 'blogger'; });
+    var cutoff = new Date(Date.now() - 7 * 86400000);
+    var seen = {};
+    var uniq = [];
+    items.forEach(function (it) {
+      var k = String(it.link || it.title || '').toLowerCase();
+      if (seen[k]) return;
+      seen[k] = 1;
+      if (it.date && new Date(it.date + 'T00:00:00') < cutoff) return;
+      uniq.push(it);
+    });
+    if (!uniq.length) {
+      box.innerHTML = '<div class="hs-empty"><div class="hs-empty-text">最近一周博主没更新</div>' +
+        '<div class="hs-empty-hint">点「刷新」再抓一次；源挂了会单独标在该条上</div></div>';
+      return;
+    }
+    var ranked = uniq.slice().sort(function (a, b) { return blogHeat(b, uniq) - blogHeat(a, uniq); });
+    var picks = [];
+    var perSrc = {};
+    ranked.forEach(function (it) {
+      var cap = 2;
+      if ((perSrc[it.source] || 0) >= cap) return;
+      perSrc[it.source] = (perSrc[it.source] || 0) + 1;
+      picks.push(it);
+    });
+    picks = picks.slice(0, 14);
+    box.innerHTML = picks.map(function (it, i) {
+      var tt = hotTitles(it);
+      var brief = it.summary ? it.summary.replace(/\s+/g, ' ').slice(0, 100) : '';
+      return '<a class="hs-item hs-item-link news-item" href="' + escapeHtml(it.link) + '" target="_blank" rel="noopener" style="animation-delay:' + Math.min(i, 12) * 0.03 + 's">' +
+        '<span class="news-cat news-cat-blogger">' + escapeHtml(it.source || '博客') + '</span>' +
+        '<div class="hs-item-main">' +
+          '<div class="hs-item-title hs-item-title-link">' + escapeHtml(tt.main) + '</div>' +
+          (tt.sub ? '<div class="news-title-en">' + escapeHtml(tt.sub) + '</div>' : '') +
+          (brief ? '<div class="hs-item-meta">' + escapeHtml(brief) + (it.summary && it.summary.length > 100 ? '…' : '') + '</div>' : '') +
+        '</div>' +
+        '<div class="hs-item-arrow">' + escapeHtml(it.date || '') + ' ↗</div>' +
+      '</a>';
+    }).join('') +
+      '<div class="news-foot">近 7 天热帖 · 按话题热度与新鲜度排 · ' + picks.length + ' 条</div>';
+  }
+
   function renderHotspots() {
     var container = $('#hotspotList');
     if (!container) return;
-    var items = (state.hotspots && state.hotspots.items) || [];
+    var all = (state.hotspots && state.hotspots.items) || [];
+    var items = hsVisible(all, state.hsShowAll);
     refreshUnreadBadges();   // 徽标归侧栏统一管：未读红点 / 已读总数
-    if (items.length === 0) {
+    if (all.length === 0) {
       container.innerHTML =
         '<div class="hs-empty">' +
         '<div class="hs-empty-icon">' + HS_ICONS.hotspot + '</div>' +
         '<div class="hs-empty-text">热点日报还没出过一期</div>' +
-        '<div class="hs-empty-hint">定时任务每天 10:00 / 16:00 自动生成；也可将报纸风 HTML 放入 09_工作台程序/data/hotspots/ 目录</div>' +
+        '<div class="hs-empty-hint">定时任务每天早上生成一期；也可将报纸风 HTML 放入 data/hotspots/ 目录</div>' +
+        '</div>';
+      return;
+    }
+    if (items.length === 0) {
+      container.innerHTML =
+        '<div class="hs-empty">' +
+        '<div class="hs-empty-icon">' + HS_ICONS.hotspot + '</div>' +
+        '<div class="hs-empty-text">今天还没有新的一期</div>' +
+        '<div class="hs-empty-hint">每天早上自动生成一期' +
+        '<button class="hs-more" data-toggle="all">看历史归档（' + all.length + ' 期）</button></div>' +
         '</div>';
       return;
     }
@@ -1667,50 +2572,52 @@
     items.forEach(function (d, i) {
       if (d.date !== lastDate) {
         if (lastDate !== null) html.push('</div>');
-        html.push('<div class="hs-day-group"><div class="hs-day-label">' + escapeHtml(d.date) + '</div>');
+        html.push('<div class="hs-day-group"><div class="hs-day-label">' + escapeHtml(dsDateLabel(d.date)) + '</div>');
         lastDate = d.date;
       }
       var sizeKb = (d.size / 1024).toFixed(1);
       var isAm = d.session.indexOf('上午') !== -1;
+      // 列表项本身就是超链接：点一下在新标签页直接打开当期的完整报纸版
       html.push(
-        '<div class="hs-item" data-file="' + escapeHtml(d.file) + '" style="animation-delay:' + (i * 0.04) + 's">' +
+        '<a class="hs-item hs-item-link" href="/hotspot/' + encodeURIComponent(d.file) + '" target="_blank" rel="noopener" data-file="' + escapeHtml(d.file) + '" style="animation-delay:' + (i * 0.04) + 's">' +
           '<span class="hs-session ' + (isAm ? 'hs-session-am' : 'hs-session-pm') + '">' + escapeHtml(d.session || '日报') + '</span>' +
           '<div class="hs-item-main">' +
-            '<div class="hs-item-title">热点日报 · ' + escapeHtml(d.date) + ' ' + escapeHtml(d.session || '') + '</div>' +
+            '<div class="hs-item-title hs-item-title-link">热点日报 · ' + escapeHtml(d.date) + ' ' + escapeHtml(d.session || '') + '</div>' +
             '<div class="hs-item-meta">' + sizeKb + ' KB · 归档于 ' + escapeHtml(d.modified || '') + '</div>' +
           '</div>' +
-          '<div class="hs-item-arrow">展开 →</div>' +
-        '</div>'
+          '<div class="hs-item-arrow">点开阅读 →</div>' +
+        '</a>'
       );
     });
     html.push('</div>');
+    if (all.length > items.length) {
+      html.push('<button class="hs-more" data-toggle="all">还有 ' + (all.length - items.length) + ' 期历史归档，点开查看</button>');
+    } else if (state.hsShowAll) {
+      html.push('<button class="hs-more" data-toggle="today">只看今天</button>');
+    }
     container.innerHTML = html.join('');
   }
 
+  // 列表口径：默认只显示当天，历史要手动点开（避免页面越积越长的过期内容）
+  function hsVisible(all, showAll) {
+    if (showAll) return all;
+    var t = hsTodayIso();
+    return all.filter(function (d) { return d.date === t; });
+  }
+
+  function hsTodayIso() {
+    var d = new Date();
+    var m = ('0' + (d.getMonth() + 1)).slice(-2);
+    var day = ('0' + d.getDate()).slice(-2);
+    return d.getFullYear() + '-' + m + '-' + day;
+  }
+
   function openHotspot(file) {
-    var url = '/hotspot/' + encodeURIComponent(file);
-    $('#hotspotOpenTab').href = url;
-    var stem = file.replace(/\.html$/, '');
-    $('#hotspotDetailTitle').textContent = '热点日报 · ' + stem;
-    $('#hotspotsListView').style.display = 'none';
-    $('#hotspotsDetailView').style.display = 'block';
-    pushReportHash('hotspots', file);
-    var frame = $('#hotspotFrame');
-    frame.innerHTML = '<div style="text-align:center;padding:60px 20px;color:var(--text-secondary);">加载中…</div>';
-    // fetch HTML，提取 body 内容直接注入（不再用 iframe，自动继承工作台主题）
-    fetch(url).then(function (resp) { return resp.text(); }).then(function (html) {
-      injectArchivedPaper(frame, html);
-    }).catch(function () {
-      frame.innerHTML = '<div style="text-align:center;padding:60px 20px;color:var(--danger);">加载失败，请返回重试</div>';
-    });
-    var scrollBox = document.querySelector('.main-content') || document.querySelector('.main');
-    if (scrollBox) scrollBox.scrollTop = 0;
+    openReportView('hotspot', file);
   }
 
   function closeHotspot() {
-    $('#hotspotFrame').innerHTML = '';
-    $('#hotspotsListView').style.display = 'block';
-    $('#hotspotsDetailView').style.display = 'none';
+    closeReportView();
   }
 
   // ============================================================
@@ -1861,13 +2768,30 @@
     if (pctEl) pctEl.textContent = Math.round(pct) + '%';
   }
 
-  function startPdfCreep() {
-    stopPdfCreep();
-    state.pdf.creepTimer = setInterval(function () {
-      if (!state.pdf.running) { stopPdfCreep(); return; }
-      if (state.pdf.progress < 92) setPdfProgress(state.pdf.progress + 0.6);
-    }, 1000);
+  // 任务句柄落盘：F5 之后还能接着看同一个任务，不再从 0% 重来
+  var PDF_JOB_KEY = 'wb_pdf_job_v1';
+
+  function pdfJobSave(info) {
+    try { localStorage.setItem(PDF_JOB_KEY, JSON.stringify(info || {})); } catch (e) {}
   }
+
+  function pdfJobLoad() {
+    try { return JSON.parse(localStorage.getItem(PDF_JOB_KEY) || 'null'); } catch (e) { return null; }
+  }
+
+  function pdfJobClear() {
+    try { localStorage.removeItem(PDF_JOB_KEY); } catch (e) {}
+  }
+
+  function setPdfIndeterminate(text) {
+    var fill = $('#pdfProgressFill');
+    if (fill) { fill.classList.remove('failed'); fill.classList.add('indeterminate'); fill.style.width = '100%'; }
+    var pctEl = $('#pdfProgressPct');
+    if (pctEl) pctEl.textContent = '…';
+    if (text) $('#pdfProgressStage').textContent = text;
+  }
+
+  function startPdfCreep() { /* 不再用假进度：进度一律以 worker 回报为准，避免卡在 92% 这种死等 */ }
 
   function stopPdfCreep() {
     if (state.pdf.creepTimer) {
@@ -1882,8 +2806,7 @@
     $('#pdfProgressStage').textContent = stage;
     $('#pdfProgressEngine').textContent = engine ? ('引擎：' + (engine === 'cloud' ? '云端加速' : '本地解析')) : '';
     state.pdf.progress = 0;
-    setPdfProgress(0);
-    startPdfCreep();
+    setPdfIndeterminate(stage);
   }
 
   // 轮询时只更新阶段文字和百分比，不重置进度
@@ -1907,6 +2830,7 @@
 
   function failPdfJob(msg) {
     state.pdf.running = false;
+    pdfJobClear();
     clearPdfTimer();
     stopPdfCreep();
     var fill = $('#pdfProgressFill');
@@ -1927,8 +2851,153 @@
     }
   }
 
-  function startPdfJob() {
-    var file = state.pdf.file;
+  // ===== 文献库 PDF：直接送转写（不用再手动上传） =====
+  var pdfInboxFiles = [];
+
+  function loadPdfInbox() {
+    return api('/api/pdf-inbox/files').then(function (d) {
+      pdfInboxFiles = (d && d.files) || [];
+      renderPdfInbox();
+    }).catch(function () {});
+  }
+
+  function renderPdfInbox() {
+    var list = $('#pdfInboxList');
+    var hint = $('#pdfInboxHint');
+    if (!list) return;
+    if (!pdfInboxFiles.length) {
+      list.innerHTML = '';
+      if (hint) hint.textContent = '文献库里还没有 PDF（资讯里点「求助全文」，归档后会出现在这里）';
+      return;
+    }
+    if (hint) hint.textContent = '共 ' + pdfInboxFiles.length + ' 份 · 没转写的会自动送本地解析，点「转写」可立即补跑';
+    list.innerHTML = pdfInboxFiles.map(function (f) {
+      var mb = (f.bytes / 1048576).toFixed(1);
+      var done = !!f.transcribed;
+      var busy = !!f.inProgress;
+      var btns = '';
+      if (done && f.jobId) {
+        btns = '<button class="pdf-inbox-go pdf-inbox-open" data-job="' + escapeHtml(f.jobId) +
+               '" data-title="' + escapeHtml(f.title) + '">查看结果</button>' +
+               '<button class="pdf-inbox-go pdf-inbox-redo" data-name="' + escapeHtml(f.name) + '">再转写</button>';
+      } else if (busy && f.jobId) {
+        btns = '<button class="pdf-inbox-go pdf-inbox-open" data-job="' + escapeHtml(f.jobId) +
+               '" data-title="' + escapeHtml(f.title) + '">看进度</button>';
+      } else {
+        btns = '<button class="pdf-inbox-go" data-name="' + escapeHtml(f.name) + '">转写</button>';
+      }
+      var badge = done ? '<span class="pdf-inbox-done" title="已转写">已转写</span>'
+                  : (busy ? '<span class="pdf-inbox-busy">转写中</span>' : '');
+      return '<li class="pdf-inbox-item' + (done ? ' is-done' : '') + '" data-name="' + escapeHtml(f.name) + '">' +
+        '<span class="pdf-inbox-title" title="' + escapeHtml(f.name) + '">' + escapeHtml(f.title) + '</span>' +
+        '<span class="pdf-inbox-meta">' + mb + ' MB · ' + escapeHtml(f.mtime) + '</span>' +
+        badge + btns +
+        '</li>';
+    }).join('');
+  }
+
+  // 打开一篇已经转写过的文献：直接把结果铺到「转写结果」卡里
+  function openPdfJobById(jobId, title) {
+    if (!jobId) return;
+    switchPanel('pdf');
+    api('/api/pdf/status?jobId=' + encodeURIComponent(jobId)).then(function (st) {
+      state.pdf.jobId = jobId;
+      state.pdf.title = title || '';
+      if (st.status === 'done') {
+        state.pdf.running = false;
+        updatePdfStartState();
+        loadPdfResult();
+        toast('已打开：' + String(title || jobId).slice(0, 30));
+        return;
+      }
+      if (st.status === 'queued' || st.status === 'running') {
+        state.pdf.running = true;
+        updatePdfStartState();
+        $('#pdfProgressCard').hidden = false;
+        $('#pdfProgressEngine').textContent = '引擎：本地解析';
+        if (st.status === 'queued') setPdfIndeterminate(st.progressText || '排队中，等待上一任务完成…');
+        else { setPdfProgress(st.progress || 0); $('#pdfProgressStage').textContent = st.progressText || '解析中…'; }
+        pollPdfStatus();
+        return;
+      }
+      if (st.status === 'error') {
+        // 失败要说清楚原因，别只说「没有可用结果」——否则看着像点了没反应
+        state.pdf.running = false;
+        updatePdfStartState();
+        var raw = String(st.error || '').split('\n');
+        var reason = '';
+        for (var i = 0; i < raw.length; i++) {
+          if (raw[i] && !/^(RuntimeError|Error|Traceback)/.test(raw[i].trim())) { reason = raw[i].trim(); break; }
+        }
+        if (!reason) reason = (raw[0] || '未知错误').trim();
+        var friendly = /not enough memory|DefaultCPUAllocator|内存/i.test(st.error || '')
+          ? '本地转写引擎内存不足（MinerU 跑不动这份 PDF）。关掉占内存的程序后可以重新转写，或者改用云端引擎。'
+          : reason.slice(0, 120);
+        $('#pdfProgressCard').hidden = false;
+        $('#pdfProgressEngine').textContent = '引擎：本地解析（失败）';
+        $('#pdfProgressStage').textContent = '转写失败：' + friendly;
+        setPdfProgress(Number(st.progress) || 0);
+        toast('转写失败：' + friendly);
+        return;
+      }
+      toast('这个任务没有可用的结果');
+    }).catch(function () { toast('打不开这个任务（转写引擎可能没起）'); });
+  }
+
+  // 页面加载后如果什么任务都没在跑，就把最近一次转写完的文献结果铺出来，
+  // 免得「转写结果」永远是空的、看着像什么都没做
+  function restoreLatestPdfResult() {
+    if (state.pdf.jobId) return;
+    // 以服务端最近转写完的任务为准（扫 data/pdf_jobs 的结果文件）：
+    // 文献库的「按字节数对任务」在换过目录/改过名之后会对不上，之前就是它让结果卡空着
+    var pick = function (jobs) {
+      if (!jobs || !jobs.length || state.pdf.jobId) return;
+      var last = jobs[0];
+      state.pdf.jobId = last.jobId;
+      state.pdf.title = last.title || '';
+      state.pdf.running = false;
+      hidePdfError();
+      updatePdfStartState();
+      loadPdfResult();
+    };
+    api('/api/pdf/recent').then(function (d) {
+      if (d && d.jobs && d.jobs.length) { pick(d.jobs); return; }
+      var hit = null;
+      for (var i = 0; i < pdfInboxFiles.length; i++) {
+        if (pdfInboxFiles[i].transcribed && pdfInboxFiles[i].jobId) { hit = pdfInboxFiles[i]; break; }
+      }
+      if (hit) pick([{ jobId: hit.jobId, title: hit.title }]);
+    }).catch(function () {});
+  }
+
+  function startPdfFromInbox(name, title) {
+    if (!name) return;
+    if (state.pdf.running) {
+      toast('已有一个转写任务在跑，等它结束再点这份');
+      return;
+    }
+    switchPanel('pdf');
+    state.pdf.running = true;
+    state.pdf.title = title || String(name).replace(/\.pdf$/i, '');
+    updatePdfStartState();
+    hidePdfError();
+    showPdfProgress('提交文献库 PDF…', 'local');
+    api('/api/pdf/from-inbox', {
+      method: 'POST',
+      body: JSON.stringify({ name: name, engine: 'local' })
+    }).then(function (sub) {
+      if (!sub || !sub.ok) throw new Error((sub && sub.error) || '提交失败');
+      state.pdf.jobId = sub.jobId;
+      pdfJobSave({ jobId: sub.jobId, engine: 'local', title: state.pdf.title, at: Date.now() });
+      showPdfProgress('排队中…', 'local');
+      toast('已提交转写：' + String(state.pdf.title).slice(0, 40));
+      pollPdfStatus();
+    }).catch(function (e) {
+      failPdfJob((e && e.message) ? e.message : String(e));
+    });
+  }
+
+  function startPdfJob() {    var file = state.pdf.file;
     if (!file || state.pdf.running) return;
     var engine = getPdfEngine();
     state.pdf.running = true;
@@ -1955,6 +3024,7 @@
     }).then(function (sub) {
       if (!sub.ok) throw new Error(sub.error || '提交失败');
       state.pdf.jobId = sub.jobId;
+      pdfJobSave({ jobId: sub.jobId, engine: engine, title: state.pdf.title || file.name, at: Date.now() });
       showPdfProgress('排队中…', engine);
       pollPdfStatus();
     }).catch(function (e) {
@@ -1962,14 +3032,48 @@
     });
   }
 
-  function pollPdfStatus() {
-    clearPdfTimer();
+  // 页面重载后接着看同一个任务：不重来、不从 0% 起
+  function resumePdfJob() {
+    var saved = pdfJobLoad();
+    if (!saved || !saved.jobId) return;
+    api('/api/pdf/status?jobId=' + encodeURIComponent(saved.jobId)).then(function (st) {
+      if (st.status === 'queued' || st.status === 'running') {
+        state.pdf.jobId = saved.jobId;
+        state.pdf.title = saved.title || '';
+        state.pdf.running = true;
+        updatePdfStartState();
+        $('#pdfProgressCard').hidden = false;
+        $('#pdfProgressEngine').textContent = '引擎：' + (saved.engine === 'cloud' ? '云端加速' : '本地解析');
+        if (st.status === 'queued') {
+          setPdfIndeterminate(st.progressText || '排队中，等待上一任务完成…');
+        } else {
+          setPdfProgress(st.progress || 0);
+          $('#pdfProgressStage').textContent = st.progressText || '解析中…';
+        }
+        pollPdfStatus();
+        toast('接着看上一个转写任务：' + String(saved.title || saved.jobId).slice(0, 30));
+      } else if (st.status === 'done') {
+        state.pdf.jobId = saved.jobId;
+        state.pdf.title = saved.title || '';
+        state.pdf.running = false;
+        loadPdfResult();
+      } else {
+        pdfJobClear();
+      }
+    }).catch(function () { /* 引擎没起或任务已过期：静默放弃 */ });
+  }
+
+  function pollPdfStatus() {    clearPdfTimer();
     var miss = 0;
     state.pdf.timer = setInterval(function () {
       api('/api/pdf/status?jobId=' + encodeURIComponent(state.pdf.jobId)).then(function (st) {
         miss = 0;
-        if (st.status === 'queued' || st.status === 'running') {
-          updatePdfStage(st.progressText || '解析中…', st.progress);
+        if (st.status === 'queued') {
+          // 排队等上一个任务：不打假进度，条形走流动动画
+          setPdfIndeterminate(st.progressText || '排队中，等待上一任务完成…');
+        } else if (st.status === 'running') {
+          updatePdfStage(st.progressText || '解析中…',
+                         (typeof st.progress === 'number' && st.progress > 0) ? st.progress : null);
         } else if (st.status === 'done') {
           clearPdfTimer();
           stopPdfCreep();
@@ -1991,6 +3095,7 @@
     api('/api/pdf/result?jobId=' + encodeURIComponent(state.pdf.jobId)).then(function (d) {
       if (!d.ok) throw new Error(d.error || '读取结果失败');
       state.pdf.running = false;
+      pdfJobClear();
       state.pdf.markdown = d.markdown;
       updatePdfStartState();
       $('#pdfProgressCard').hidden = true;
@@ -2017,13 +3122,17 @@
       $('#pdfReadResultWrap').hidden = true;
       $('#pdfReadContent').innerHTML = '';
       $('#pdfReadEmpty').hidden = false;
-      // 结果头部：以论文名为主标题（文件名美化 / 送转写来源标题），路径不再裸露——定位交给「打开文件夹」
-      var t = state.pdf.title || (state.pdf.file && state.pdf.file.name ? String(state.pdf.file.name).replace(/\.pdf$/i, '') : '');
+      // 结果头部：以论文名为主标题。目录名会被截成 30 字（"Wireless Modular Millirobots W"），
+      // 所以优先用 result.md 里的 `# 一级标题` 作为完整题目。
+      var mdTitle = '';
+      var mm = String(d.markdown || '').match(/^\s*#\s+(.{6,240})\s*$/m);
+      if (mm) mdTitle = mm[1].trim();
+      var t = mdTitle || state.pdf.title || (state.pdf.file && state.pdf.file.name ? String(state.pdf.file.name).replace(/\.pdf$/i, '') : '');
       if (!t) {
         var segs = String(d.savedPath || '').split('/');
         t = segs.length >= 2 ? segs[segs.length - 2] : '';
       }
-      t = t.replace(/_\d{1,4}$/, '').replace(/[-_]+/g, ' ').replace(/\s+/g, ' ').trim();
+      if (!mdTitle) t = t.replace(/_\d{1,4}$/, '').replace(/[-_]+/g, ' ').replace(/\s+/g, ' ').trim();
       var titleEl = $('#pdfResultTitle');
       titleEl.textContent = t || '转写结果';
       titleEl.title = t || '';
@@ -2049,6 +3158,7 @@
     $('#pdfPreview').innerHTML = html;
     numberPdfFigures($('#pdfPreview'));
     bindPdfImageLightbox('#pdfPreview');
+    applyMath($('#pdfPreview'));
   }
 
   function switchPdfView(mode) {
@@ -2292,6 +3402,7 @@
     var html = rewritePdfImagePaths(renderMarkdown(translated), state.pdf.jobId);
     $('#pdfTransContent').innerHTML = html;
     numberPdfFigures($('#pdfTransContent'));
+    applyMath($('#pdfTransContent'));
     $('#pdfTransResultWrap').hidden = false;
     bindPdfImageLightbox('#pdfTransContent');
   }
@@ -2413,9 +3524,9 @@
     // 关键词
     if (d.keywords) {
       var kws = d.keywords.split(/[,，]/).map(function (k) { return k.trim(); }).filter(Boolean);
-      html += '<h3>关键词</h3><p>' + kws.map(function (k) {
+      html += '<h3>关键词</h3><div class="kw-chips">' + kws.map(function (k) {
         return '<span class="pdf-kw-tag">' + escapeHtml(k) + '</span>';
-      }).join(' ') + '</p>';
+      }).join('') + '</div>';
     }
 
     // 研究问题与意义
@@ -2513,6 +3624,7 @@
     }
 
     $('#pdfSumContent').innerHTML = html;
+    applyMath($('#pdfSumContent'));   // 概览里的公式也要按 KaTeX 排版
     var meta = d.model ? ('模型：' + prettyModelName(d.model) + ' · ' + d.tokens + ' tokens') : '';
     if (d.depth) meta += ' · ' + SUM_DEPTH_LABELS[d.depth];
     $('#pdfSumMeta').textContent = meta;
@@ -2596,10 +3708,234 @@
     }).catch(function () {});
   }
 
+  // ===== 分组（摘要卡片 / 译文库 / 原文精读 共用）=====
+  // 为什么要单独一套：三处列表的条目 id 已经存在，分组只是「用户自己给它们贴的抽屉」，
+  // 所以存在 server 的 data/library_groups.json 里，不动 worker 的卡片/译文/精读文件。
+  var GROUP_BARS = { summary: '#summaryGroupFilter', trans: '#transGroupFilter', read: '#readGroupFilter' };
+  var groupStore = {
+    summary: { groups: [], assign: {} },
+    trans: { groups: [], assign: {} },
+    read: { groups: [], assign: {} }
+  };
+  var groupActive = { summary: '', trans: '', read: '' };
+
+  function groupsLoad(kind) {
+    return api('/api/groups?kind=' + encodeURIComponent(kind)).then(function (d) {
+      if (d && d.ok) {
+        groupStore[kind] = { groups: d.groups || [], assign: d.assign || {} };
+      }
+      renderGroupBar(kind);
+      rerenderKind(kind);
+      return groupStore[kind];
+    }).catch(function () { renderGroupBar(kind); return groupStore[kind]; });
+  }
+
+  function groupsOfEntry(kind, entryId) {
+    var assign = (groupStore[kind] && groupStore[kind].assign) || {};
+    return assign[entryId] || [];
+  }
+
+  // ===== 条目别名（每个文献可以自己起个叫法，只改展示名） =====
+  var entryNames = { loaded: false, data: { summary: {}, trans: {}, read: {} } };
+
+  function loadEntryNames() {
+    if (entryNames.loaded) return Promise.resolve(entryNames.data);
+    return api('/api/entry/names').then(function (d) {
+      if (d && d.ok && d.names) {
+        entryNames.data = {
+          summary: d.names.summary || {},
+          trans: d.names.trans || {},
+          read: d.names.read || {}
+        };
+        entryNames.loaded = true;
+      }
+      return entryNames.data;
+    }).catch(function () { return entryNames.data; });
+  }
+
+  function nameOf(kind, id, fallback) {
+    var n = (entryNames.data[kind] || {})[id];
+    return n || fallback || '';
+  }
+
+  function ensureNames(kind) {
+    if (entryNames.loaded || entryNames.loading) return;
+    entryNames.loading = true;
+    loadEntryNames().then(function () {
+      entryNames.loading = false;
+      rerenderKind(kind);
+    });
+  }
+
+  function renameEntry(kind, id, curTitle) {
+    var label = kind === 'summary' ? '摘要' : (kind === 'trans' ? '译文' : '精读');
+    var input = window.prompt('给这条' + label + '起个自己的叫法（留空=恢复原标题）', nameOf(kind, id, curTitle) || '');
+    if (input === null) return;
+    api('/api/entry/rename', {
+      method: 'POST',
+      body: JSON.stringify({ kind: kind, id: id, name: String(input).trim() })
+    }).then(function (d) {
+      if (!d || !d.ok) { toast((d && d.error) || '改名失败'); return; }
+      entryNames.data[kind] = d.names || {};
+      toast(String(input).trim() ? '已改名' : '已恢复原标题');
+      rerenderKind(kind);
+    }).catch(function () { toast('改名失败：请求异常'); });
+  }
+
+  function groupPasses(kind, entryId) {
+    var act = groupActive[kind];
+    if (!act) return true;
+    return groupsOfEntry(kind, entryId).indexOf(act) >= 0;
+  }
+
+  function groupsPost(body) {
+    return api('/api/groups', { method: 'POST', body: JSON.stringify(body) }).then(function (d) {
+      if (d && d.ok) {
+        groupStore[body.kind] = { groups: d.groups || [], assign: d.assign || {} };
+        renderGroupBar(body.kind);
+      }
+      return d;
+    });
+  }
+
+  function renderGroupBar(kind) {
+    var el = $(GROUP_BARS[kind]);
+    if (!el) return;
+    var st = groupStore[kind] || { groups: [], assign: {} };
+    var act = groupActive[kind];
+    var html = '<button class="grp-chip' + (act ? '' : ' active') + '" data-act="all">全部分组</button>';
+    st.groups.forEach(function (g) {
+      html += '<span class="grp-chip-wrap">' +
+        '<button class="grp-chip' + (act === g.id ? ' active' : '') + '" data-act="pick" data-gid="' + escapeHtml(g.id) + '">' +
+        escapeHtml(g.name) + ' <span class="grp-count">' + (g.count || 0) + '</span></button>' +
+        '<button class="grp-ren" data-act="ren" data-gid="' + escapeHtml(g.id) + '" title="重命名这个分组">✎</button>' +
+        '<button class="grp-del" data-act="del" data-gid="' + escapeHtml(g.id) + '" title="删除这个分组（只删抽屉，不动条目）">×</button>' +
+        '</span>';
+    });
+    html += '<button class="grp-chip grp-new" data-act="new">＋ 新建分组</button>';
+    el.innerHTML = html;
+  }
+
+  function groupAskName(kind, entryId, preset) {
+    var st = groupStore[kind] || { groups: [] };
+    var names = st.groups.map(function (g) { return g.name; });
+    var hint = names.length ? ('已有分组：' + names.join('、') + '\n输入已有名称=加进去，输入新名称=新建并加入') : '给这个分组起个名字（比如「译文库」「原文精读」「驱动方式」）';
+    var val = window.prompt(hint, preset || '');
+    if (val === null) return;
+    val = String(val).trim();
+    if (!val) return;
+    var hit = st.groups.filter(function (g) { return g.name === val; })[0];
+    if (hit) {
+      if (!entryId) return;
+      groupsPost({ kind: kind, action: 'assign', entryId: entryId, groupId: hit.id, on: true }).then(function (d) {
+        toast(d && d.ok ? ('已加入分组「' + val + '」') : '加入失败');
+        rerenderKind(kind);
+      });
+    } else {
+      groupsPost({ kind: kind, action: 'create', name: val, entryId: entryId || '' }).then(function (d) {
+        if (!d || !d.ok) { toast((d && d.error) || '新建失败'); return; }
+        toast(entryId ? ('已新建分组「' + val + '」并加入') : ('已新建分组「' + val + '」'));
+        rerenderKind(kind);
+      });
+    }
+  }
+
+  function rerenderKind(kind) {
+    if (kind === 'summary') renderSummaryCards();
+    else if (kind === 'trans') renderTranslations();
+    else renderReadings();
+  }
+
+  function bindGroupBar(kind) {
+    var el = $(GROUP_BARS[kind]);
+    if (!el) return;
+    el.addEventListener('click', function (e) {
+      var btn = e.target.closest('[data-act]');
+      if (!btn) return;
+      e.preventDefault();
+      e.stopPropagation();
+      var act = btn.dataset.act;
+      var gid = btn.dataset.gid || '';
+      if (act === 'all') {
+        groupActive[kind] = '';
+        renderGroupBar(kind); rerenderKind(kind);
+        return;
+      }
+      if (act === 'pick') {
+        groupActive[kind] = (groupActive[kind] === gid) ? '' : gid;
+        renderGroupBar(kind); rerenderKind(kind);
+        return;
+      }
+      if (act === 'new') { groupAskName(kind, '', ''); return; }
+      if (act === 'ren') {
+        var gr = (groupStore[kind].groups || []).filter(function (x) { return x.id === gid; })[0] || {};
+        var nn = window.prompt('给分组改个名字', gr.name || '');
+        if (nn === null) return;
+        nn = String(nn).trim();
+        if (!nn || nn === gr.name) return;
+        groupsPost({ kind: kind, action: 'rename', groupId: gid, name: nn }).then(function (d) {
+          toast(d && d.ok ? '分组已改名' : ((d && d.error) || '改名失败'));
+          rerenderKind(kind);
+        });
+        return;
+      }
+      if (act === 'del') {
+        var g = (groupStore[kind].groups || []).filter(function (x) { return x.id === gid; })[0] || {};
+        if (!window.confirm('删除分组「' + (g.name || '') + '」？\n只删除这个分组，卡片和译文本身都还在。')) return;
+        groupsPost({ kind: kind, action: 'delete', groupId: gid }).then(function (d) {
+          if (d && d.ok) {
+            if (groupActive[kind] === gid) groupActive[kind] = '';
+            toast('已删除分组');
+            rerenderKind(kind);
+          } else { toast((d && d.error) || '删除失败'); }
+        });
+      }
+    });
+  }
+
+  function groupToggleMenu(kind, entryId, title) {
+    var st = groupStore[kind] || { groups: [] };
+    if (!st.groups.length) {
+      groupAskName(kind, entryId, '');
+      return;
+    }
+    var cur = groupsOfEntry(kind, entryId);
+    var listTxt = st.groups.map(function (g, i) {
+      return (i + 1) + '. ' + (cur.indexOf(g.id) >= 0 ? '[已加入] ' : '') + g.name;
+    }).join('\n');
+    var input = window.prompt('给「' + String(title || '').slice(0, 26) + '」选分组：\n' + listTxt +
+      '\n\n输入序号加入/移出（已加入的再输一次就移出）；输入新名称=新建并加入', '');
+    if (input === null) return;
+    input = String(input).trim();
+    if (!input) return;
+    var idx = parseInt(input, 10);
+    if (!isNaN(idx) && st.groups[idx - 1]) {
+      var g = st.groups[idx - 1];
+      var on = cur.indexOf(g.id) < 0;
+      groupsPost({ kind: kind, action: 'assign', entryId: entryId, groupId: g.id, on: on }).then(function (d) {
+        toast(d && d.ok ? (on ? ('已加入「' + g.name + '」') : ('已移出「' + g.name + '」')) : '操作失败');
+        rerenderKind(kind);
+      });
+      return;
+    }
+    var hit = st.groups.filter(function (x) { return x.name === input; })[0];
+    if (hit) {
+      groupsPost({ kind: kind, action: 'assign', entryId: entryId, groupId: hit.id, on: cur.indexOf(hit.id) < 0 })
+        .then(function () { rerenderKind(kind); toast('分组已更新'); });
+      return;
+    }
+    groupsPost({ kind: kind, action: 'create', name: input, entryId: entryId }).then(function (d) {
+      if (!d || !d.ok) { toast((d && d.error) || '新建失败'); return; }
+      toast('已新建分组「' + input + '」并加入');
+      rerenderKind(kind);
+    });
+  }
+
   function renderSummaryCards() {
     var list = $('#summaryCardList');
     var empty = $('#summaryEmpty');
     if (!list) return;
+    ensureNames('summary');
 
     var filtered = summaryAll;
     if (summaryFilter !== 'all') {
@@ -2615,8 +3951,12 @@
     if (summaryTagActive) {
       filtered = filtered.filter(function (s) { return (s.tags || []).indexOf(summaryTagActive) >= 0; });
     }
+    if (groupActive.summary) {
+      filtered = filtered.filter(function (s) { return groupPasses('summary', s.id); });
+    }
 
     renderSummaryTagFilter();
+    renderGroupBar('summary');
 
     if (!filtered.length) {
       list.innerHTML = '';
@@ -2643,7 +3983,7 @@
 
     var html = '';
     filtered.forEach(function (s) {
-      var title = s.title || s.title_en || '未命名论文';
+      var title = nameOf('summary', s.id, s.title || s.title_en || '未命名论文');
       var year = s.year ? ' · ' + s.year : '';
       var keywords = s.keywords ? s.keywords.split(/[,，]/).slice(0, 4).map(function (k) {
         return '<span class="sum-card-kw">' + escapeHtml(k.trim()) + '</span>';
@@ -2655,8 +3995,16 @@
       html += '<div class="sum-card-header">';
       html += '<span class="sum-card-depth ' + (depthClass[s.depth] || '') + '">' + (depthIcons[s.depth] || '') + (depthLabels[s.depth] || s.depth) + '</span>';
       html += '<span class="sum-card-date">' + escapeHtml(s.created_at || '') + '</span>';
+      var eg = groupsOfEntry('summary', s.id);
+      var gnames = (groupStore.summary.groups || []).filter(function (g) { return eg.indexOf(g.id) >= 0; })
+        .map(function (g) { return g.name; });
+      html += '<button class="sum-card-grp" data-grp="' + escapeHtml(s.id) + '" data-title="' + escapeHtml(title) +
+        '" title="加入 / 移出分组（可自己起分组名）">' +
+        (gnames.length ? ('分组·' + escapeHtml(gnames.join('/')) + ' ▾') : '＋分组') + '</button>';
+      html += '<button class="sum-card-ren sum-ren-btn" data-ren="' + escapeHtml(s.id) + '" title="给这篇论文起个自己的叫法">✎</button>';
+      html += '<button class="sum-card-del entry-del" data-del="' + escapeHtml(s.id) + '" aria-label="删除这张摘要卡片" title="删除这张摘要卡片（只删摘要记录，不动 PDF）">×</button>';
       html += '</div>';
-      html += '<div class="sum-card-title">' + escapeHtml(title) + '<span class="sum-card-year">' + escapeHtml(year) + '</span></div>';
+      html += '<div class="sum-card-title sum-card-title-copy" data-copy="' + escapeHtml(title) + '" title="点一下复制标题">' + escapeHtml(title) + '<span class="sum-card-year">' + escapeHtml(year) + '</span></div>';
       if (s.one_liner) {
         html += '<div class="sum-card-oneliner">' + escapeHtml(s.one_liner) + '</div>';
       }
@@ -2673,7 +4021,69 @@
     list.innerHTML = html;
 
     list.querySelectorAll('.sum-card').forEach(function (card) {
-      card.addEventListener('click', function () {
+      card.addEventListener('click', function (e) {
+        // 卡片右上角圆圈：任何时候点都算勾选（不必先开「勾选模式」），和概览同一份状态
+        var chk = e.target.closest('.sum-card-check');
+        if (chk) {
+          e.stopPropagation();
+          toggleSumSelect(card.dataset.id);
+          return;
+        }
+        // 分组按钮：加入 / 移出某个分组
+        var grp = e.target.closest('.sum-card-grp');
+        if (grp) {
+          e.stopPropagation();
+          groupToggleMenu('summary', grp.dataset.grp, grp.dataset.title);
+          return;
+        }
+        var ren = e.target.closest('.sum-card-ren');
+        if (ren) {
+          e.stopPropagation();
+          var rec0 = summaryAll.filter(function (x) { return x.id === ren.dataset.ren; })[0] || {};
+          renameEntry('summary', ren.dataset.ren, rec0.title || rec0.title_en || '');
+          return;
+        }
+        // 删除按钮：先确认，再删摘要记录（PDF 原文不动）
+        var del = e.target.closest('.sum-card-del');
+        if (del) {
+          e.stopPropagation();
+          var sid = del.dataset.del;
+          var rec = summaryAll.filter(function (x) { return x.id === sid; })[0] || {};
+          var name = (rec.title || rec.title_en || '这张卡片');
+          if (!window.confirm('删除摘要卡片「' + String(name).slice(0, 40) + '」？\n只删摘要记录，文献库里的 PDF 不会动。')) return;
+          del.disabled = true;
+          del.textContent = '…';
+          api('/api/pdf/summary/delete', {
+            method: 'POST',
+            body: JSON.stringify({ id: sid })
+          }).then(function (r) {
+            if (!r || !r.ok) throw new Error((r && r.error) || '删除失败');
+            summaryAll = summaryAll.filter(function (x) { return x.id !== sid; });
+            if (summaryCurrentId === sid) { summaryCurrentId = ''; }
+            renderSummaryCards();
+            renderTodayBoard(); renderWeekReview();
+            toast('已删除这张摘要卡片');
+          }).catch(function (err2) {
+            del.disabled = false;
+            del.textContent = '×';
+            toast('删除失败：' + ((err2 && err2.message) || '未知原因'));
+          });
+          return;
+        }
+        // 标题：点一下复制全文标题（复制成功给个轻提示，不跳转）
+        var ttl = e.target.closest('.sum-card-title-copy');
+        if (ttl) {
+          e.stopPropagation();
+          var titleText = ttl.dataset.copy || '';
+          if (titleText) {
+            copyToClipboard(titleText).then(function () {
+              toast('已复制标题：' + titleText.slice(0, 40) + (titleText.length > 40 ? '…' : ''));
+            }).catch(function () {
+              toast('复制失败，请手动选中标题');
+            });
+          }
+          return;
+        }
         // 勾选模式下点卡片 = 切换选中；普通模式 = 打开详情
         if (sumSelectMode) { toggleSumSelect(this.dataset.id); return; }
         openSummaryDetail(this.dataset.id);
@@ -2683,20 +4093,36 @@
 
   // ===== 勾选模式 + 浮动操作条 + BibTeX 导出 + 综述草稿 =====
   var sumSelectMode = false;
+  var SUM_SEL_KEY = 'wb_sum_selected_v1';
   var sumSelected = [];
+  try {
+    var _ss = JSON.parse(localStorage.getItem(SUM_SEL_KEY) || '[]');
+    if (Array.isArray(_ss)) sumSelected = _ss;
+  } catch (e) { sumSelected = []; }
+
+  function saveSumSelected() {
+    try { localStorage.setItem(SUM_SEL_KEY, JSON.stringify(sumSelected)); } catch (e) {}
+  }
 
   function toggleSumSelect(id) {
     var idx = sumSelected.indexOf(id);
     if (idx >= 0) sumSelected.splice(idx, 1); else sumSelected.push(id);
+    saveSumSelected();
     renderSummaryCards();
     updateSumActionBar();
+    // 概览「最近论文」的勾选状态与这里共用同一份 sumSelected，跟着一起刷
+    if (typeof renderTodayBoard === 'function') renderTodayBoard();
   }
 
   function setSumSelectMode(on) {
     sumSelectMode = !!on;
-    if (!sumSelectMode) { sumSelected = []; }
+    if (!sumSelectMode) { sumSelected = []; saveSumSelected(); }
     var btn = $('#summarySelectToggle');
-    if (btn) btn.classList.toggle('active', sumSelectMode);
+    if (btn) {
+      btn.classList.toggle('active', sumSelectMode);
+      // 进入勾选模式后按钮文字变成「退出勾选」，提供一个明确的退出口
+      btn.textContent = sumSelectMode ? '退出勾选' : '勾选模式';
+    }
     renderSummaryCards();
     updateSumActionBar();
   }
@@ -2720,15 +4146,38 @@
     setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 200);
   }
 
+  // 文献导出格式：国标、APA、MLA、Chicago、RIS、EndNote、CSL-JSON、BibTeX
+  var EXPORT_FMT_EXT = {
+    gb7714: 'txt', apa: 'txt', mla: 'txt', chicago: 'txt',
+    ris: 'ris', endnote: 'enw', csljson: 'json', bibtex: 'bib'
+  };
+  var EXPORT_FMT_LABEL = {
+    gb7714: 'GB/T 7714', apa: 'APA', mla: 'MLA', chicago: 'Chicago',
+    ris: 'RIS', endnote: 'EndNote', csljson: 'CSL-JSON', bibtex: 'BibTeX'
+  };
+
+  function currentExportFmt() {
+    var bar = $('#exportFmtBar'), top = $('#exportFmtTop');
+    var v = (bar && bar.value) || (top && top.value) || 'gb7714';
+    return v;
+  }
+
+  // 导出 = 直接复制到剪贴板（用户要求：粘一下就能用，不落 txt 文件）
   function exportBibtex() {
     var ids = sumSelectMode && sumSelected.length ? sumSelected.slice() : null;
-    api('/api/pdf/summaries/bibtex', {
+    var fmt = currentExportFmt();
+    api('/api/pdf/summaries/cite', {
       method: 'POST',
-      body: JSON.stringify(ids ? { ids: ids } : {})
+      body: JSON.stringify({ ids: ids, fmt: fmt })
     }).then(function (d) {
       if (!d.ok) { toast('导出失败：' + (d.error || '未知错误')); return; }
-      downloadTextFile(d.bibtex, '学术工作台-文献库.bib');
-      toast('已导出 ' + d.count + ' 条 BibTeX');
+      var text = d.text || d.bibtex || '';
+      var label = EXPORT_FMT_LABEL[fmt] || fmt;
+      copyToClipboard(text).then(function () {
+        toast('已按 ' + label + ' 复制 ' + d.count + ' 条，可直接粘贴');
+      }, function () {
+        toast('复制失败：浏览器拒绝了剪贴板，请再点一次');
+      });
     }).catch(function () { toast('导出失败：请求异常'); });
   }
 
@@ -2984,6 +4433,7 @@
     var list = $('#transList');
     var empty = $('#transEmpty');
     if (!list) return;
+    ensureNames('trans');
     var items = state.translations || [];
     var badge = $('#navTransBadge');
     if (badge) {
@@ -2995,6 +4445,10 @@
     var filtered = q ? items.filter(function (t) {
       return [t.title, t.source, t.excerpt].join(' ').toLowerCase().indexOf(q) >= 0;
     }) : items;
+    if (groupActive.trans) {
+      filtered = filtered.filter(function (t) { return groupPasses('trans', t.id); });
+    }
+    renderGroupBar('trans');
 
     if (!filtered.length) {
       list.innerHTML = '';
@@ -3012,18 +4466,59 @@
     if (empty) empty.hidden = true;
     list.innerHTML = filtered.map(function (t, i) {
       var k = Math.max(1, Math.round((t.chars || 0) / 1000));
+      var dispTitle = nameOf('trans', t.id, t.title || '未命名译文');
       return '<div class="trans-item" data-id="' + escapeHtml(t.id) + '" style="animation-delay:' + (i * 0.04) + 's">' +
         '<div class="trans-item-main">' +
-          '<div class="trans-item-title">' + escapeHtml(t.title || '未命名译文') + '</div>' +
+          '<div class="trans-item-title">' + escapeHtml(dispTitle) + '</div>' +
           '<div class="trans-item-meta">' + escapeHtml(t.source || '') + ' · ' + k + 'k 字 · ' + escapeHtml(t.created_at || '') + '</div>' +
           (t.excerpt ? '<div class="trans-item-excerpt">' + escapeHtml(t.excerpt) + '</div>' : '') +
         '</div>' +
         '<div class="hs-item-arrow">打开 →</div>' +
+        '<button class="trans-grp-btn" data-grp="' + escapeHtml(t.id) + '" data-title="' + escapeHtml(dispTitle) + '" title="加入 / 移出分组">' +
+        (function () {
+          var eg = groupsOfEntry('trans', t.id);
+          var gs = (groupStore.trans.groups || []).filter(function (g) { return eg.indexOf(g.id) >= 0; });
+          return gs.length ? ('分组·' + escapeHtml(gs.map(function (g) { return g.name; }).join('/')) + ' ▾') : '＋分组';
+        })() + '</button>' +
+        '<button class="trans-ren-btn" data-ren="' + escapeHtml(t.id) + '" title="给这条译文起个自己的叫法">✎</button>' +
+        '<button class="trans-del-btn entry-del" data-del="' + escapeHtml(t.id) + '" aria-label="从译文库删除" title="从译文库删除">×</button>' +
         '</div>';
     }).join('');
     list.querySelectorAll('.trans-item').forEach(function (el) {
-      el.addEventListener('click', function () { openTranslationDetail(this.dataset.id); });
+      el.addEventListener('click', function (e) {
+        var gb = e.target.closest('.trans-grp-btn');
+        if (gb) { e.stopPropagation(); groupToggleMenu('trans', gb.dataset.grp, gb.dataset.title); return; }
+        var rb = e.target.closest('.trans-ren-btn');
+        if (rb) { e.stopPropagation(); renameEntry('trans', rb.dataset.ren, tdTitle(rb.dataset.ren)); return; }
+        var db = e.target.closest('.trans-del-btn');
+        if (db) { e.stopPropagation(); deleteListEntry('trans', db.dataset.del, db); return; }
+        openTranslationDetail(this.dataset.id);
+      });
     });
+  }
+
+  function tdTitle(id) {
+    var rec = (state.translations && state.translations.items || []).filter(function (x) { return x.id === id; })[0] || {};
+    return rec.title || '';
+  }
+
+  function rdTitle(id) {
+    var rec = (state.readings && state.readings.items || []).filter(function (x) { return x.id === id; })[0] || {};
+    return rec.title || '';
+  }
+
+  // 译文库 / 精读库的列表级删除（和摘要卡片上的「删除」同一套逻辑）
+  function deleteListEntry(kind, id, btn) {
+    if (!id) return;
+    var label = kind === 'trans' ? '译文' : '精读';
+    if (!window.confirm('从' + label + '库删除这一条？原 PDF 转写任务不受影响。')) return;
+    if (btn) btn.disabled = true;
+    var url = kind === 'trans' ? '/api/pdf/translation/delete' : '/api/pdf/reading/delete';
+    api(url, { method: 'POST', body: JSON.stringify({ id: id }) }).then(function (d) {
+      if (!d.ok) { toast('删除失败：' + (d.error || '未知错误')); if (btn) btn.disabled = false; return; }
+      toast('已删除该' + label);
+      if (kind === 'trans') loadTranslations(true); else loadReadings(true);
+    }).catch(function () { toast('删除失败：请求异常'); if (btn) btn.disabled = false; });
   }
 
   function openTranslationDetail(id) {
@@ -3046,6 +4541,7 @@
       try {
         numberPdfFigures(box);
         bindPdfImageLightbox('#transDetailContent');   // 该函数收选择器字符串，不是元素
+        applyMath(box);
       } catch (e) {
         if (window.console) console.warn('译文图注/灯箱初始化失败（不影响阅读）', e);
       }
@@ -3398,6 +4894,7 @@
     var box = $('#pdfReadContent');
     box.innerHTML = html;
     numberPdfFigures(box);
+    applyMath(box);
   }
 
   function showPdfReadingResult(markdown) {
@@ -3449,6 +4946,7 @@
     var list = $('#readList');
     var empty = $('#readEmpty');
     if (!list) return;
+    ensureNames('read');
     var items = state.readings || [];
     var badge = $('#navReadingBadge');
     if (badge) {
@@ -3459,6 +4957,10 @@
     var filtered = q ? items.filter(function (t) {
       return [t.title, t.source, t.excerpt].join(' ').toLowerCase().indexOf(q) >= 0;
     }) : items;
+    if (groupActive.read) {
+      filtered = filtered.filter(function (t) { return groupPasses('read', t.id); });
+    }
+    renderGroupBar('read');
 
     if (!filtered.length) {
       list.innerHTML = '';
@@ -3476,17 +4978,34 @@
     if (empty) empty.hidden = true;
     list.innerHTML = filtered.map(function (t, i) {
       var k = Math.max(1, Math.round((t.chars || 0) / 1000));
+      var dispTitle = nameOf('read', t.id, t.title || '未命名精读');
       return '<div class="trans-item" data-id="' + escapeHtml(t.id) + '" style="animation-delay:' + (i * 0.04) + 's">' +
         '<div class="trans-item-main">' +
-          '<div class="trans-item-title">' + escapeHtml(t.title || '未命名精读') + '</div>' +
+          '<div class="trans-item-title">' + escapeHtml(dispTitle) + '</div>' +
           '<div class="trans-item-meta">' + escapeHtml(t.source || '') + ' · ' + k + 'k 字 · ' + escapeHtml(t.created_at || '') + '</div>' +
           (t.excerpt ? '<div class="trans-item-excerpt">' + escapeHtml(t.excerpt) + '</div>' : '') +
         '</div>' +
         '<div class="hs-item-arrow">打开 →</div>' +
+        '<button class="trans-grp-btn" data-grp="' + escapeHtml(t.id) + '" data-title="' + escapeHtml(dispTitle) + '" title="加入 / 移出分组">' +
+        (function () {
+          var eg = groupsOfEntry('read', t.id);
+          var gs = (groupStore.read.groups || []).filter(function (g) { return eg.indexOf(g.id) >= 0; });
+          return gs.length ? ('分组·' + escapeHtml(gs.map(function (g) { return g.name; }).join('/')) + ' ▾') : '＋分组';
+        })() + '</button>' +
+        '<button class="trans-ren-btn" data-ren="' + escapeHtml(t.id) + '" title="给这篇精读起个自己的叫法">✎</button>' +
+        '<button class="trans-del-btn entry-del" data-del="' + escapeHtml(t.id) + '" aria-label="从精读库删除" title="从精读库删除">×</button>' +
         '</div>';
     }).join('');
     list.querySelectorAll('.trans-item').forEach(function (el) {
-      el.addEventListener('click', function () { openReadingDetail(this.dataset.id); });
+      el.addEventListener('click', function (e) {
+        var gb = e.target.closest('.trans-grp-btn');
+        if (gb) { e.stopPropagation(); groupToggleMenu('read', gb.dataset.grp, gb.dataset.title); return; }
+        var rb = e.target.closest('.trans-ren-btn');
+        if (rb) { e.stopPropagation(); renameEntry('read', rb.dataset.ren, rdTitle(rb.dataset.ren)); return; }
+        var db = e.target.closest('.trans-del-btn');
+        if (db) { e.stopPropagation(); deleteListEntry('read', db.dataset.del, db); return; }
+        openReadingDetail(this.dataset.id);
+      });
     });
   }
 
@@ -3508,6 +5027,7 @@
       try {
         numberPdfFigures(box);
         bindPdfImageLightbox('#readDetailContent');
+        applyMath(box);
       } catch (e) {
         if (window.console) console.warn('精读图注/灯箱初始化失败（不影响阅读）', e);
       }
@@ -3722,9 +5242,21 @@
   function renderJournalText(text) {
     var esc = escapeHtml(String(text || ''));
     // [[card:标题]] → 卡片引用链接（点击跳转摘要卡片并打开详情）
-    return esc.replace(/\[\[card:([^\]]+)\]\]/g, function (_, title) {
+    esc = esc.replace(/\[\[card:([^\]]+)\]\]/g, function (_, title) {
       return '<a class="journal-card-link" data-card-title="' + title + '" href="javascript:void(0)">' + title + '</a>';
     });
+    // 日志正文里直接写出的论文标题，也自动变成可点链接（同一套跳转逻辑）
+    (summaryAll || []).slice(0, 300).forEach(function (s) {
+      [String(s.title || '').trim(), String(s.title_en || '').trim()].forEach(function (x) {
+        if (!x || x.length < 12) return;
+        var ex = escapeHtml(x);
+        if (esc.indexOf('>' + ex + '</a>') >= 0) return;   // 已经链过就别再套一层
+        if (esc.indexOf(ex) >= 0) {
+          esc = esc.split(ex).join('<a class="journal-card-link" data-card-title="' + ex + '" href="javascript:void(0)">' + ex + '</a>');
+        }
+      });
+    });
+    return esc;
   }
 
   function jumpToCard(title) {
@@ -4228,7 +5760,7 @@
         '<div class="focus-log-title' + (e.text || isBreak ? '' : ' is-empty') + '">' + escapeHtml(title) + '</div>' +
         '<div class="focus-log-meta">' + when + status + '</div>' +
         '</div>' +
-        '<span class="focus-log-min">' + (isBreak ? '休息 ' : '') + e.minutes + ' 分</span>' +
+        '<span class="focus-log-min">' + (isBreak ? '休息 ' : '') + e.minutes + ' 分钟</span>' +
         '</div>';
     }).join('');
   }
@@ -4311,7 +5843,7 @@
     if (d.abstract_en) html += '<h3>Abstract</h3><p class="sum-abstract-en">' + escapeHtml(d.abstract_en).replace(/\n/g, '<br>') + '</p>';
     if (d.keywords) {
       var kws = d.keywords.split(/[,，]/).map(function (k) { return k.trim(); }).filter(Boolean);
-      html += '<h3>关键词</h3><p>' + kws.map(function (k) { return '<span class="pdf-kw-tag">' + escapeHtml(k) + '</span>'; }).join(' ') + '</p>';
+      html += '<h3>关键词</h3><div class="kw-chips">' + kws.map(function (k) { return '<span class="pdf-kw-tag">' + escapeHtml(k) + '</span>'; }).join('') + '</div>';
     }
     if (d.research_question) html += '<h3>研究问题与意义</h3><p>' + escapeHtml(d.research_question).replace(/\n/g, '<br>') + '</p>';
     if (d.methodology) html += '<h3>方法论架构</h3><p>' + escapeHtml(d.methodology).replace(/\n/g, '<br>') + '</p>';
@@ -4378,6 +5910,7 @@
       html += '</ul>';
     }
     el.innerHTML = html;
+    applyMath(el);   // 摘要字段是逐字段拼的，必须显式排版公式
   }
 
   function initPdfImageLightbox() {
@@ -4826,10 +6359,33 @@
       btn.addEventListener('click', function () { switchPanel(btn.dataset.goto); });
     });
 
-    // 今日工作台：动态内容，用事件委托跳转面板
+    // 今日工作台：动态内容，用事件委托跳转面板；「今日待办」前面的圆圈直接勾选完成，不跳转
     var todayBoardEl = $('#todayBoard');
     if (todayBoardEl) {
       todayBoardEl.addEventListener('click', function (e) {
+        var chk = e.target.closest('[data-todo-check]');
+        if (chk) {
+          e.preventDefault();
+          e.stopPropagation();
+          var tid = Number(chk.dataset.todoCheck);
+          chk.disabled = true;
+          api('/api/todos', { method: 'POST', body: JSON.stringify({ action: 'toggle', id: tid }) })
+            .then(function (res) {
+              if (res && res.ok) {
+                state.todos = res.todos;
+                renderTodos();
+                renderDashboardTodos();
+                updateTodoBadge();
+                renderTodayBoard();
+                toast('已勾选完成（与「待办」面板同步）');
+              } else {
+                chk.disabled = false;
+                toast('勾选失败：' + ((res && res.error) || '未知原因'));
+              }
+            })
+            .catch(function () { chk.disabled = false; toast('勾选失败：请求异常'); });
+          return;
+        }
         var el = e.target.closest('[data-goto]');
         if (!el) return;
         switchPanel(el.dataset.goto);
@@ -4913,6 +6469,41 @@
       deletePublication(parseInt(btn.dataset.id));
     });
 
+    // 毕业要求 · 其他环节（点击切换完成，事件委托）
+    var gradTrackEl = $('#gradTrack');
+    if (gradTrackEl) {
+      gradTrackEl.addEventListener('click', function (e) {
+        var btn = e.target.closest('[data-action="toggle-grad"]');
+        if (!btn) return;
+        api('/api/graduation', { method: 'POST', body: JSON.stringify({ key: btn.dataset.key }) })
+          .then(function (res) {
+            if (res && res.ok) {
+              if (state.overview) state.overview.graduation = res.graduation;
+              renderGraduation();
+            }
+          });
+      });
+    }
+
+    // 文件夹面板：点卡片打开目录，点文件名用系统默认程序打开
+    var sectionsGridEl = $('#sectionsGrid');
+    if (sectionsGridEl) {
+      sectionsGridEl.addEventListener('click', function (e) {
+        var fileEl = e.target.closest('.section-file');
+        if (fileEl) {
+          e.stopPropagation();
+          api('/api/open', { method: 'POST', body: JSON.stringify({ path: fileEl.dataset.file }) })
+            .then(function (r) { if (!r || !r.ok) toast('打开文件失败：' + ((r && r.error) || '未知原因')); });
+          return;
+        }
+        var cardEl = e.target.closest('.section-card');
+        if (cardEl) {
+          api('/api/open', { method: 'POST', body: JSON.stringify({ path: cardEl.dataset.path }) })
+            .then(function (r) { if (!r || !r.ok) toast('打开目录失败'); });
+        }
+      });
+    }
+
     // 资讯 tab
     $('#newsTabs').addEventListener('click', function (e) {
       var tab = e.target.closest('.news-tab');
@@ -4934,8 +6525,25 @@
     // 刷新资讯
     $('#refreshBtn').addEventListener('click', refreshNews);
 
+    // 资讯面板：用论文题目去高级搜索引擎（Google Scholar）找文献
+    var schInput = $('#newsScholarQuery');
+    var schBtn = $('#newsScholarBtn');
+    function openScholarSearch() {
+      var q = (schInput && schInput.value || '').trim();
+      if (!q) { toast('先把论文题目粘贴到搜索框里'); return; }
+      var url = 'https://scholar.google.com/scholar?q=' + encodeURIComponent(q);
+      window.open(url, '_blank', 'noopener');
+    }
+    if (schBtn) schBtn.addEventListener('click', openScholarSearch);
+    if (schInput) {
+      schInput.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); openScholarSearch(); }
+      });
+    }
+
     // 资讯：开放获取条目「送转写」（捕获阶段拦截，避免触发外链跳转）
-    var newsListEl = $('#newsList');
+    // 今日热点 · 前沿流里的「下载全文 / 收录 / DOI 复制」按钮都在这条列表里
+    var newsListEl = $('#hotFeedList') || $('#newsList');
     if (newsListEl) {
       newsListEl.addEventListener('click', function (e) {
         var btn = e.target.closest('.news-transcribe-btn');
@@ -4952,11 +6560,76 @@
         e.stopPropagation();
         quickAddFromNews(btn.dataset);
       }, true);
+      // 资讯：一键去科研通求助（复制 DOI/标题 + 打开求助发布页）
+      newsListEl.addEventListener('click', function (e) {
+        var btn = e.target.closest('.news-ablesci-btn');
+        if (!btn) return;
+        e.preventDefault();
+        e.stopPropagation();
+        askOnAblesci(btn.dataset.doi, btn.dataset.title);
+      }, true);
+      // 求助队列：取消某条排队任务
+      var ablesciStatusEl = $('#ablesciStatus');
+      if (ablesciStatusEl) {
+        ablesciStatusEl.addEventListener('click', function (e) {
+          var btn = e.target.closest('.ablesci-cancel');
+          if (!btn) return;
+          e.preventDefault();
+          var qid = btn.dataset.id;
+          btn.disabled = true;
+          btn.textContent = '取消中…';
+          api('/api/ablesci/queue/finish', {
+            method: 'POST',
+            body: JSON.stringify({ id: qid, status: 'skip', note: '用户手动取消' })
+          }).then(function () {
+            toast('已取消这条求助');
+            ablesciLoad();
+          }).catch(function () {
+            btn.disabled = false;
+            btn.textContent = '取消';
+            toast('取消失败，稍后再试');
+          });
+        });
+      }
+
+      // 资讯：点 DOI 徽标单独复制
+      newsListEl.addEventListener('click', function (e) {
+        // 标题快捷方式：点「⧉ 标题」复制论文标题
+        var tchip = e.target.closest('.news-title-copy');
+        if (tchip) {
+          e.preventDefault();
+          e.stopPropagation();
+          copyToClipboard(tchip.dataset.copyTitle || '')
+            .then(function () { toast('论文标题已复制，可直接粘到科研通/学术搜索'); },
+                  function () { toast('复制失败，请手动选择文本'); });
+          return;
+        }
+        var chip = e.target.closest('.news-doi');
+        if (!chip) return;
+        e.preventDefault();
+        e.stopPropagation();
+        copyToClipboard(String(chip.textContent || '').replace(/^\s*DOI\s*/i, ''))
+          .then(function () { toast('DOI 已复制'); },
+                function () { toast('复制失败，请手动选择文本'); });
+      }, true);
     }
 
-    // 资讯：只看与研究领域相关
+    // 原来的资讯面板（分源资讯）：只保留「送转写」按钮的拦截
+    var plainNewsEl = $('#newsList');
+    if (plainNewsEl && plainNewsEl !== newsListEl) {
+      plainNewsEl.addEventListener('click', function (e) {
+        var btn = e.target.closest('.news-transcribe-btn');
+        if (!btn) return;
+        e.preventDefault();
+        e.stopPropagation();
+        sendToTranscribe(btn.dataset.pdf, btn.dataset.title || '');
+      }, true);
+    }
+
+    // 资讯：只看与研究领域相关（默认开启，先看强相关的，需要时再点开全量）
     var relToggle = $('#newsRelToggle');
     if (relToggle) {
+      relToggle.classList.toggle('active', state.relevanceOnly);
       relToggle.addEventListener('click', function () {
         state.relevanceOnly = !state.relevanceOnly;
         this.classList.toggle('active', state.relevanceOnly);
@@ -4964,13 +6637,62 @@
       });
     }
 
+    // 资讯：下载的 PDF 是否自动归档进文献库（存 data/settings.json，跨重启记住）
+    var inboxToggle = $('#newsInboxToggle');
+    if (inboxToggle) {
+      var paintInbox = function (on) { inboxToggle.classList.toggle('active', !!on); };
+      fetch('/api/pdf-inbox').then(function (r) { return r.json(); }).then(function (d) {
+        if (!d) return;
+        paintInbox(d.auto);
+        if (d.dir) inboxToggle.title = '自动归档目录：' + d.dir;
+      }).catch(function () {});
+      inboxToggle.addEventListener('click', function () {
+        var next = !inboxToggle.classList.contains('active');
+        paintInbox(next);
+        fetch('/api/pdf-inbox', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ auto: next })
+        }).then(function (r) { return r.json(); }).then(function (d) {
+          if (d && d.dir) inboxToggle.title = '自动归档目录：' + d.dir;
+          toast(next ? '下载的 PDF 会按论文标题重命名并归档到文献库' : '下载的 PDF 只留在下载目录');
+        }).catch(function () { toast('保存失败，稍后再点一次'); });
+      });
+    }
+
+    // 资讯：归档进来的 PDF 是否自动送「PDF 转写」（本地解析）
+    var transToggle = $('#newsTranscribeToggle');
+    if (transToggle) {
+      var paintTrans = function (on) { transToggle.classList.toggle('active', !!on); };
+      fetch('/api/pdf-inbox').then(function (r) { return r.json(); }).then(function (d) {
+        if (!d) return;
+        paintTrans(d.transcribe);
+      }).catch(function () {});
+      transToggle.addEventListener('click', function () {
+        var next = !transToggle.classList.contains('active');
+        paintTrans(next);
+        fetch('/api/pdf-inbox', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ transcribe: next })
+        }).then(function (r) { return r.json(); }).then(function () {
+          toast(next ? '以后归档的 PDF 会自动送本地转写（约 1–2 分钟/篇）' : '归档的 PDF 只入库，不自动转写');
+        }).catch(function () { toast('保存失败，稍后再点一次'); });
+      });
+    }
+
     // ===== 摘要卡片：勾选模式 / 浮动操作条 / BibTeX / 综述模态 =====
+    // 分组条：三处列表各自一条，共用同一套建组/加入逻辑
+    ['summary', 'trans', 'read'].forEach(function (k) {
+      bindGroupBar(k);
+      groupsLoad(k);
+    });
     var selToggle = $('#summarySelectToggle');
     if (selToggle) {
       selToggle.addEventListener('click', function () { setSumSelectMode(!sumSelectMode); });
     }
     var actClear = $('#sumActionClear');
-    if (actClear) actClear.addEventListener('click', function () { sumSelected = []; renderSummaryCards(); updateSumActionBar(); });
+    if (actClear) actClear.addEventListener('click', function () { sumSelected = []; saveSumSelected(); renderSummaryCards(); updateSumActionBar(); renderTodayBoard(); });
     var actBib = $('#sumActionBib');
     if (actBib) actBib.addEventListener('click', exportBibtex);
     var bibBtn = $('#summaryBibBtn');
@@ -5117,11 +6839,21 @@
       renderJournals();
     });
 
-    // 术语搜索
-    $('#glossarySearch').addEventListener('input', function (e) {
-      state.glossaryQuery = e.target.value;
-      renderGlossary();
-    });
+    // 术语搜索：本地边输边筛；回车/按钮走外部学术搜索（本地词条覆盖不到时用）
+    var glInput = $('#glossarySearch');
+    if (glInput) {
+      glInput.addEventListener('input', function (e) {
+        state.glossaryQuery = e.target.value;
+        renderGlossary();
+      });
+      glInput.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); openGlossarySearch('scholar'); }
+      });
+    }
+    var glScholar = $('#glossaryScholarBtn');
+    if (glScholar) glScholar.addEventListener('click', function () { openGlossarySearch('scholar'); });
+    var glSemantic = $('#glossarySemanticBtn');
+    if (glSemantic) glSemantic.addEventListener('click', function () { openGlossarySearch('semantic'); });
 
     // 检索式复制
     $('#queryList').addEventListener('click', function (e) {
@@ -5155,49 +6887,78 @@
       });
     });
 
-    // 前沿瞭望：列表点击 / 返回 / 刷新 / 打开归档目录
-    $('#frontierList').addEventListener('click', function (e) {
-      var item = e.target.closest('.hs-item');
-      if (!item) return;
-      openFrontier(item.dataset.file);
+    // 今日热点 · 前沿：类别/时间筛选 + 换一批 + 刷新 + 归档目录
+    var newsFilters = $('#hotFeedFilters');
+    if (newsFilters) newsFilters.addEventListener('click', function (e) {
+      var chip = e.target.closest('.news-filter');
+      if (!chip) return;
+      if (chip.dataset.pushmore) {
+        // 换一批：把池子换个顺序重挑（已在十条里的先让位）
+        var pool = ((state.hotFeed && state.hotFeed.items) || []).filter(function (it) {
+          return it.cat !== 'blogger' && (state.hotPicks || []).indexOf(it) < 0;
+        });
+        var extra = pickHotItems(pool, 4);
+        if (!extra.length) { toast('池子里暂时没有新条目了'); return; }
+        state.hotPicks = extra.concat((state.hotPicks || [])).slice(0, HOT_PICK_N);
+        renderHotDigest(state.hotPicks);
+        renderHotFilters();
+        toast('换了一批');
+        return;
+      }
+      if (chip.dataset.days) {
+        state.hotDays = parseInt(chip.dataset.days, 10) || 1;
+        loadHotFeed();
+        return;
+      }
+      state.hotCat = chip.dataset.cat || 'all';
+      renderHotFeed();
     });
-    $('#frontierBackBtn').addEventListener('click', closeFrontier);
-    $('#frontierRefreshBtn').addEventListener('click', function () {
+    // 每篇后面的 👍 / 👎：点了就按类别调整以后推什么
+    var digestBox = $('#hotDigest');
+    if (digestBox) digestBox.addEventListener('click', function (e) {
+      var btn = e.target.closest('.hs-vote');
+      if (!btn) return;
+      e.preventDefault();
+      e.stopPropagation();
+      var row = btn.closest('.hs-digest-row');
+      var idx = row ? parseInt(row.dataset.idx, 10) : -1;
+      var it = (state.hotPicks || [])[idx];
+      if (!it) return;
+      var v = parseInt(btn.dataset.vote, 10) || 1;
+      hotVote(it, v);
+      toast(v === 1 ? '已记下：这类多推' : '已记下：这类少推');
+      renderHotDigest(state.hotPicks);
+      renderHotFilters();
+    });
+    if ($('#hotspotRefreshBtn')) $('#hotspotRefreshBtn').addEventListener('click', function () {
       var btn = this;
       btn.classList.add('loading');
-      loadFrontier().then(function () {
+      Promise.all([loadHotFeed(true)]).then(function () {
         btn.classList.remove('loading');
-        toast('前沿瞭望归档已刷新');
+        toast('热点日报 已刷新');
       });
     });
-    $('#frontierFolderBtn').addEventListener('click', function () {
+    if ($('#hotspotFolderBtn')) $('#hotspotFolderBtn').addEventListener('click', function () {
       api('/api/open', {
         method: 'POST',
-        body: JSON.stringify({ path: '09_工作台程序/data/frontier' })
+        body: JSON.stringify({ path: 'data/hotspots' })
       }).then(function (r) { if (!r.ok) toast('打开目录失败'); });
     });
-
-    // 热点日报：列表点击 / 返回 / 刷新 / 打开归档目录
-    $('#hotspotList').addEventListener('click', function (e) {
-      var item = e.target.closest('.hs-item');
-      if (!item) return;
-      openHotspot(item.dataset.file);
-    });
-    $('#hotspotBackBtn').addEventListener('click', closeHotspot);
-    $('#hotspotRefreshBtn').addEventListener('click', function () {
-      var btn = this;
-      btn.classList.add('loading');
-      loadHotspots().then(function () {
-        btn.classList.remove('loading');
-        toast('热点日报归档已刷新');
-      });
-    });
-    $('#hotspotFolderBtn').addEventListener('click', function () {
+    var hotSection = $('#hotspotSectionFolder');
+    if (hotSection) hotSection.addEventListener('click', function () {
       api('/api/open', {
         method: 'POST',
-        body: JSON.stringify({ path: '09_工作台程序/data/hotspots' })
+        body: JSON.stringify({ path: 'data/hotspots' })
       }).then(function (r) { if (!r.ok) toast('打开目录失败'); });
     });
+    var frontFolder = $('#frontierFolderLink');
+    if (frontFolder) frontFolder.addEventListener('click', function () {
+      api('/api/open', {
+        method: 'POST',
+        body: JSON.stringify({ path: 'data/frontier' })
+      }).then(function (r) { if (!r.ok) toast('打开目录失败'); });
+    });
+    if ($('#hotspotBackBtn')) $('#hotspotBackBtn').addEventListener('click', closeHotspot);
 
     // ===== 摘要卡片库 =====
     $$('.sum-filter-btn').forEach(function (btn) {
@@ -5217,7 +6978,7 @@
     $('#summaryFolderBtn').addEventListener('click', function () {
       api('/api/open', {
         method: 'POST',
-        body: JSON.stringify({ path: '09_工作台程序/data/summaries' })
+        body: JSON.stringify({ path: 'data/summaries' })
       }).then(function (r) { if (!r.ok) toast('打开目录失败'); });
     });
 
@@ -5225,7 +6986,7 @@
     $('#transFolderBtn').addEventListener('click', function () {
       api('/api/open', {
         method: 'POST',
-        body: JSON.stringify({ path: '09_工作台程序/data/translations' })
+        body: JSON.stringify({ path: 'data/translations' })
       }).then(function (r) { if (!r.ok) toast('打开目录失败'); });
     });
     $('#transRefreshBtn').addEventListener('click', function () {
@@ -5266,7 +7027,7 @@
     $('#readFolderBtn').addEventListener('click', function () {
       api('/api/open', {
         method: 'POST',
-        body: JSON.stringify({ path: '09_工作台程序/data/readings' })
+        body: JSON.stringify({ path: 'data/readings' })
       }).then(function (r) { if (!r.ok) toast('文件夹没打开，可能路径不对'); });
     });
 
@@ -5279,18 +7040,21 @@
     loadTranslations();
     loadReadings();
 
-    // ===== 科技爱好者周刊 =====
-    $('#weeklyRefreshBtn').addEventListener('click', function () {
-      var btn = this;
-      btn.classList.add('loading');
-      loadWeekly(true).then(function () {
-        btn.classList.remove('loading');
-        toast('周刊已刷新');
+    // ===== 科技周报：只保留全球科技博主的近 7 天热帖 =====
+    var wkRefresh = $('#weeklyRefreshBtn');
+    if (wkRefresh) {
+      wkRefresh.addEventListener('click', function () {
+        var btn = this;
+        btn.classList.add('loading');
+        loadHotFeed(true).then(function () {
+          btn.classList.remove('loading');
+          toast('科技周报已刷新');
+        }).catch(function () {
+          btn.classList.remove('loading');
+          toast('刷新失败：网络异常');
+        });
       });
-    });
-    $('#weeklyArchiveBtn').addEventListener('click', function () {
-      window.open('https://github.com/ruanyf/weekly/tree/master/docs', '_blank', 'noopener');
-    });
+    }
     $('#summaryBackBtn').addEventListener('click', function () {
       $('#summariesDetailView').style.display = 'none';
       $('#summariesListView').style.display = '';
@@ -5391,6 +7155,31 @@
     });
     // 开始转写
     $('#pdfStartBtn').addEventListener('click', startPdfJob);
+
+    // 文献库 PDF 一键转写
+    if ($('#pdfInboxList')) {
+      $('#pdfInboxList').addEventListener('click', function (e) {
+        var go = e.target.closest('.pdf-inbox-go');
+        if (!go) return;
+        e.preventDefault();
+        if (go.dataset.job) {   // 查看已有结果 / 看进度
+          openPdfJobById(go.dataset.job, go.dataset.title || '');
+          return;
+        }
+        var li = go.closest('.pdf-inbox-item');
+        var titleEl = li ? li.querySelector('.pdf-inbox-title') : null;
+        startPdfFromInbox(go.dataset.name, titleEl ? titleEl.textContent : '');
+      });
+    }
+    if ($('#pdfInboxRefresh')) {
+      $('#pdfInboxRefresh').addEventListener('click', function () {
+        this.disabled = true;
+        loadPdfInbox().then(function () { toast('文献库已刷新'); });
+        var self2 = this;
+        setTimeout(function () { self2.disabled = false; }, 800);
+      });
+    }
+    loadPdfInbox();
     // 结果视图切换：双栏 / 仅预览 / 仅源码
     $$('.pdf-tab').forEach(function (t) {
       t.addEventListener('click', function () { switchPdfView(t.dataset.pdfview); });
@@ -5399,8 +7188,8 @@
     $('#pdfDownloadBtn').addEventListener('click', downloadPdfMarkdown);
     $('#pdfRetryBtn').addEventListener('click', retryPdfJob);
     $('#pdfOpenFolderBtn').addEventListener('click', openPdfJobFolder);
-    // P0 一键入库
-    $('#pdfIngestBtn').addEventListener('click', openPdfIngest);
+    // P0 一键入库（按钮已在转写结果卡上去掉；弹窗与快捷键仍保留给需要时调用）
+    if ($('#pdfIngestBtn')) $('#pdfIngestBtn').addEventListener('click', openPdfIngest);
     $('#pdfIngestClose').addEventListener('click', closePdfIngest);
     $('#pdfIngestCancel').addEventListener('click', closePdfIngest);
     $('#pdfIngestOverlay').addEventListener('click', closePdfIngest);
@@ -5481,6 +7270,7 @@
           renderTodos();
           renderDashboardTodos();
           updateTodoBadge();
+          if (typeof renderTodayBoard === 'function') renderTodayBoard();
         }
       });
   }
@@ -5536,6 +7326,11 @@
     var cj = grad.c_journal;
     $('#gradCJrnlAchieved').textContent = cj.achieved;
     $('#gradCJrnlRequired').textContent = cj.required;
+    var cjLabel = cj.label || 'C 刊论文';
+    var gradNameEl = $('#gradCJrnlName');
+    if (gradNameEl) gradNameEl.textContent = cjLabel;
+    var gradHintEl = $('#gradCompactHint');
+    if (gradHintEl) gradHintEl.textContent = '需发表 ' + (cj.required || 0) + ' 篇' + cjLabel;
     var pct = cj.required > 0 ? Math.min(100, cj.achieved / cj.required * 100) : 0;
     $('#gradCJrnlBar').style.width = pct + '%';
     // 论文列表
@@ -5553,6 +7348,23 @@
       }).join('');
     } else {
       pubList.innerHTML = '<div class="pub-empty">暂无论文记录，发表后点击上方按钮登记</div>';
+    }
+    // 论文之外的硬性环节（长期清单，点击可切换完成）
+    var gradTrack = $('#gradTrack');
+    if (gradTrack) {
+      var ms = grad.milestones || [];
+      if (ms.length) {
+        gradTrack.innerHTML = ms.map(function (m) {
+          var done = !!m.done;
+          return '<button class="grad-track-item' + (done ? ' done' : '') + '" data-action="toggle-grad" data-key="' + escapeHtml(m.key || '') + '" title="点击切换完成状态">' +
+            '<span class="grad-track-dot">' + (done ? '✓' : '') + '</span>' +
+            '<span class="grad-track-label">' + escapeHtml(m.label || '') + '</span>' +
+            (m.note ? '<span class="grad-track-note">' + escapeHtml(m.note) + '</span>' : '') +
+            '</button>';
+        }).join('');
+      } else {
+        gradTrack.innerHTML = '';
+      }
     }
   }
 
@@ -5705,12 +7517,17 @@
     if (!raw) return false;
     var parts = raw.split('/');
     var panel = parts[0];
+    if (panel === 'frontier') panel = 'hotspots';   // 旧链接兼容：热点日报已并入热点面板
     if (!$('.nav-item[data-panel="' + panel + '"]')) return false;
     switchPanel(panel);
     if (parts.length > 1) {
       var file = decodeURIComponent(parts.slice(1).join('/'));
-      if (panel === 'hotspots') setTimeout(function () { openHotspot(file); }, 60);
-      if (panel === 'frontier') setTimeout(function () { openFrontier(file); }, 60);
+      var rawPanel = raw.split('/')[0];
+      if (panel === 'hotspots') {
+        setTimeout(function () {
+          if (rawPanel === 'frontier') openFrontier(file); else openHotspot(file);
+        }, 60);
+      }
     }
     return true;
   }
@@ -5951,8 +7768,11 @@
     focusRestore();
     focusRenderAll();
     // 侧栏徽标预取：归档型面板计数启动即加载，不必等用户点进面板（本地轻接口）
+    loadWeather().catch(function () {});
     loadFrontier().catch(function () {});
     loadHotspots().catch(function () {});
+    // 概览的「今日情报」要用今日十条的口径，所以热点流也随启动预取一次
+    loadHotFeed().catch(function () {});
     loadWeekly().catch(function () {});
     // 切回标签页时立即续跑翻译（看门狗1秒兜底，这里更即时）
     document.addEventListener('visibilitychange', function () {
@@ -5963,15 +7783,193 @@
       // 也可能在后台期间已经到点）
       if (!document.hidden && focusIsActive()) { focusTick(); focusRenderAll(); }
     });
+    // 先把面板切过去（带上 hash 就直接进对应面板），数据随后到、到了再渲染。
+    // 以前是等 loadAll() 全跑完才切面板，资讯冷启动那几十秒里整页停在空白/「加载中」。
+    if (!applyHash()) switchPanel('dashboard');
     loadAll().then(function () {
       focusRenderAll();   // 待办加载完，「关联任务」下拉才有内容
-      if (!applyHash()) switchPanel('dashboard');
     });
+    // 求助队列状态：启动拉一次，之后每 30 秒刷新（页面上能看到排队中→已处理的变化）
+    ablesciLoad();
+    ablesciLoadPoints();
+    setInterval(ablesciLoad, 30000);
+    setInterval(ablesciLoadPoints, 30000);
+    // 文献库列表：启动拉一次，之后每 30 秒刷新（下载归档/自动转写都会自己冒出来）
+    loadPdfInbox().then(function () { restoreLatestPdfResult(); }).catch(function () {});
+    setInterval(function () { if (!document.hidden) loadPdfInbox().catch(function () {}); }, 30000);
+    // 刷新页面后接着看同一个转写任务（不然一切到 PDF 面板就显示 0%）
+    resumePdfJob();
+    // 待办：概览卡、今日看板、待办面板、侧栏徽标都吃 state.todos，
+    // 所以定时重拉一次就保证四处永远一致（agent 在后台改 todos.json 也会同步过来）
+    setInterval(function () { if (!document.hidden) loadTodos(); }, 30000);
   }
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', init);
   } else {
     init();
+  }
+})();
+
+/* ===== 阅读页右侧滚动轴 + 滚动后浮出的返回键 =====
+   适用：摘要卡片 / 原文精读 / 译文库 的详情阅读页（正文很长、要一路滚）
+   - 右侧固定一条可拖拽的滚动轴（比系统滚动条粗，鼠标/触控都能抓）
+   - 往下滚超过一屏多一点时，右下角浮出「← 返回列表」，点它等价于点详情页顶部的返回按钮 */
+(function () {
+  var DETAILS = [
+    { view: '#translationsDetailView', back: '#transBackBtn' },
+    { view: '#readingsDetailView', back: '#readBackBtn' },
+    { view: '#summariesDetailView', back: '#summaryBackBtn' }
+  ];
+
+  function shown(el) {
+    if (!el) return false;
+    var p = el;
+    while (p && p !== document.body) {
+      if (p.style && p.style.display === 'none') return false;
+      p = p.parentElement;
+    }
+    return !!(el.getClientRects().length);
+  }
+
+  function activeDetail() {
+    for (var i = 0; i < DETAILS.length; i++) {
+      if (shown(document.querySelector(DETAILS[i].view))) return DETAILS[i];
+    }
+    return null;
+  }
+
+  // 真正在滚的容器：从详情视图往上找第一个「内容溢出且 overflow 允许滚动」的祖先。
+  // 这个工作台是 body{overflow:auto;height:100vh} 在滚，不是 documentElement，写死会失效。
+  function scroller() {
+    var d = activeDetail();
+    var start = d ? document.querySelector(d.view) : document.querySelector('.panel.active');
+    var n = start;
+    while (n && n !== document.documentElement) {
+      if (n.scrollHeight > n.clientHeight + 8 && /(auto|scroll)/.test(getComputedStyle(n).overflowY)) return n;
+      n = n.parentElement;
+    }
+    var b = document.body;
+    if (b && b.scrollHeight > b.clientHeight + 8) return b;
+    return document.scrollingElement || document.documentElement;
+  }
+
+  var rail = document.createElement('div');
+  rail.id = 'readScrollRail';
+  rail.innerHTML = '<div id="readScrollThumb"></div>';
+  var thumb = rail.firstChild;
+  document.body.appendChild(rail);
+
+  var fab = document.createElement('button');
+  fab.id = 'readBackFab';
+  fab.type = 'button';
+  fab.innerHTML = '<span aria-hidden="true">←</span> 返回列表';
+  document.body.appendChild(fab);
+
+  var current = null;      // 当前打开的详情（用于返回）
+  var trackH = 0;
+  var thumbH = 0;
+
+  function paint() {
+    var d = activeDetail();
+    current = d;
+    var s = scroller();
+    var over = s.scrollHeight - s.clientHeight;
+    // 滚动轴：只要这一页真的能滚就出现（列表页也能拖），拖不到时就不占地方
+    if (over < 60) {
+      rail.classList.remove('on');
+    } else {
+      rail.classList.add('on');
+      trackH = rail.clientHeight;
+      thumbH = Math.max(56, Math.round(trackH * (s.clientHeight / s.scrollHeight)));
+      var top = trackH - thumbH;
+      var ratio = s.scrollTop / over;
+      thumb.style.height = thumbH + 'px';
+      thumb.style.transform = 'translateY(' + Math.round(top * Math.min(1, Math.max(0, ratio))) + 'px)';
+    }
+    // 返回键：只在三个阅读详情页、且已经往下滚过一段时出现
+    var showFab = !!d && s.scrollTop > 220;
+    fab.classList.toggle('on', showFab);
+    if (showFab) {
+      // 贴左上角，但要避开两样东西：左侧导航栏（宽屏 260px / 窄屏 72px）、
+      // 以及吸顶的标题栏（.topbar 是 sticky，按钮压在它上面会遮住标题）
+      var side = document.querySelector('.sidebar');
+      var left = side ? side.getBoundingClientRect().width + 16 : 16;
+      fab.style.left = Math.round(left) + 'px';
+      var bar = document.querySelector('.panel.active .topbar') || document.querySelector('.topbar');
+      var top = bar ? Math.round(bar.getBoundingClientRect().bottom) + 10 : 14;
+      fab.style.top = top + 'px';
+    }
+  }
+
+  var dragging = false, dragStartY = 0, dragStartScroll = 0, dragSpan = 1;
+
+  function onMove(ev) {
+    if (!dragging) return;
+    var s = scroller();
+    var delta = (ev.clientY !== undefined ? ev.clientY : ev.touches[0].clientY) - dragStartY;
+    s.scrollTop = dragStartScroll + (delta / dragSpan) * (s.scrollHeight - s.clientHeight);
+  }
+
+  function onUp() {
+    if (!dragging) return;
+    dragging = false;
+    thumb.classList.remove('grabbing');
+    window.removeEventListener('pointermove', onMove);
+    window.removeEventListener('pointerup', onUp);
+    window.removeEventListener('pointercancel', onUp);
+  }
+
+  thumb.addEventListener('pointerdown', function (ev) {
+    ev.preventDefault();
+    var s = scroller();
+    dragging = true;
+    dragStartY = ev.clientY;
+    dragStartScroll = s.scrollTop;
+    dragSpan = Math.max(1, (rail.clientHeight - thumb.clientHeight));
+    thumb.classList.add('grabbing');
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+  });
+
+  // 点空白轨道：直接跳到那个比例位置
+  rail.addEventListener('pointerdown', function (ev) {
+    if (ev.target === thumb) return;
+    var s = scroller();
+    var rect = rail.getBoundingClientRect();
+    var r = (ev.clientY - rect.top) / rect.height;
+    s.scrollTop = (s.scrollHeight - s.clientHeight) * Math.min(1, Math.max(0, r));
+  });
+
+  fab.addEventListener('click', function () {
+    var d = current || activeDetail();
+    if (!d) return;
+    var btn = document.querySelector(d.back);
+    if (btn) btn.click();
+    // 返回列表后把阅读位置归零，下次进来从头上看
+    var s = scroller();
+    s.scrollTop = 0;
+    setTimeout(paint, 60);
+  });
+
+  var queued = false;
+  function schedule() {
+    // 不用 requestAnimationFrame：后台/被节流的标签页里 rAF 可能一直不回调，
+    // 轴和返回键就永远不出现。setTimeout 兜底保证一定会执行一次。
+    if (queued) return;
+    queued = true;
+    setTimeout(function () { queued = false; paint(); }, 16);
+  }
+
+  window.addEventListener('scroll', schedule, true);
+  window.addEventListener('resize', schedule);
+  document.addEventListener('click', function () { setTimeout(schedule, 40); }, true);
+  setInterval(schedule, 800);   // 详情切走后兜底复位（例如点顶部返回按钮）
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', paint);
+  } else {
+    paint();
   }
 })();
